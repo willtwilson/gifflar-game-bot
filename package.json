@@ -8,7 +8,9 @@
     "play-v97": "node smart-player-v97.js",
     "test": "node test-ai-logic.js",
     "enumerate": "node scripts/enumerate-textures.js",
-    "analyse": "node scripts/analyse.js"
+    "analyse": "node scripts/analyse.js",
+    "neat": "node scripts/neat-play.js",
+    "neat-analyse": "node scripts/neat-analyse.js"
   },
   "keywords": [],
   "author": "",
