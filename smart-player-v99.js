@@ -349,11 +349,13 @@ async function runGame() {
               const emgPlatY    = d.platformY || py;
               const emgWindow   = d.bounceH * 1.5;
 
-              // Primary: platforms in the expanded bounce window, sorted highest (most progress) first
+              // Primary: platforms in the expanded bounce window, sorted highest (most progress) first.
+              // Exclude the current launch platform (emgPlatY) — targeting it would just bounce in place.
               const windowEmg = allPlats.filter(p =>
                 p.y > emgApexY - emgWindow &&   // up to 1.5 BH above apex (reachable with trampoline boost)
                 p.y < emgPlatY + emgWindow &&   // up to 1.5 BH below launch (catchable below current floor)
                 p.y > emgApexY &&               // CRITICAL: must be BELOW apex (reachable on the fall)
+                Math.abs(p.y - emgPlatY) > 50 && // NOT the current launch platform (avoid bounce-in-place)
                 Math.abs(p.x - px) < searchRange * 0.8
               ).sort((a, b) => a.y - b.y);     // most negative Y first = highest reachable = most progress
 
@@ -379,9 +381,17 @@ async function runGame() {
                 }
 
                 if (Math.abs(diff) < STEER_THRESH) {
-                  ai.direction     = 'center(emg)';
-                  ai.desiredX      = 187;
-                  scene.isTouching = false;
+                  // Target is directly above/below — apply wander direction to break lateral deadlock
+                  const wanderRight = d.wanderDir > 0;
+                  const xVelW = d.wanderDir * X_VEL;
+                  try { scene.player.setVelocity(xVelW, scene.player.getVelocityY()); } catch (_) {}
+                  scene.isTouching = true;
+                  scene.input.activePointer.x      = wanderRight ? 600 : 150;
+                  scene.input.activePointer.worldX = wanderRight ? 600 : 150;
+                  scene.input.activePointer.isDown = true;
+                  ai.taps++;
+                  ai.direction = wanderRight ? 'R(emg-w)' : 'L(emg-w)';
+                  ai.desiredX  = wanderRight ? 300 : 75;
                 } else {
                   const goRight = diff > 0;
                   const xVel    = goRight ? X_VEL : -X_VEL;
