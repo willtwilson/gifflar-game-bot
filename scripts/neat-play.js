@@ -4,10 +4,13 @@
  * neat-play.js — NEAT training orchestration
  *
  * Usage:
- *   node scripts/neat-play.js                   # start fresh
+ *   node scripts/neat-play.js                   # start fresh (headless)
+ *   node scripts/neat-play.js --headful          # visible browser window
  *   node scripts/neat-play.js --resume           # resume from neat-checkpoint.json
  *   node scripts/neat-play.js --generations 50  # override max generations
  *   node scripts/neat-play.js --pop-size 30      # override population size
+ *
+ * Credentials (env overrides): NEAT_EMAIL, NEAT_NAME, NEAT_USERNAME
  */
 
 const { chromium } = require('playwright');
@@ -22,15 +25,16 @@ const neatBrainSrc     = fs.readFileSync(path.join(__dirname, '..', 'lib', 'neat
 
 // ── Constants ──────────────────────────────────────────────────────────────
 const GAME_URL    = 'https://game.flarie.com/games/capriole/d9e33c9b-d082-4232-919e-29901343c54f';
-const EMAIL       = 'willtwilson+giff@gmail.com';
-const NAME        = 'Will Wilson';
-const USERNAME    = 'Frilliam';
+const EMAIL       = process.env.NEAT_EMAIL    || 'willtwilson@hotmail.com';
+const NAME        = process.env.NEAT_NAME     || 'Bill Wilson';
+const USERNAME    = process.env.NEAT_USERNAME || 'NEAT';
 const CHECKPOINT  = path.join(__dirname, '..', 'neat-checkpoint.json');
 const RESULTS     = path.join(__dirname, '..', 'neat-results.jsonl');
 
 // ── CLI args ───────────────────────────────────────────────────────────────
-const args    = process.argv.slice(2);
-const resume  = args.includes('--resume');
+const args     = process.argv.slice(2);
+const resume   = args.includes('--resume');
+const headless = !args.includes('--headful');   // --headful shows the browser window
 
 const genArg  = args.indexOf('--generations');
 if (genArg !== -1) config.maxGenerations = parseInt(args[genArg + 1], 10);
@@ -51,7 +55,7 @@ function saveCheckpoint(pop) {
 
 // ── Run a single genome through one round ─────────────────────────────────
 async function runGenome(genome) {
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless });
   const context = await browser.newContext({
     viewport:  { width: 375, height: 812 },
     hasTouch:  true,
