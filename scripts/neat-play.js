@@ -75,13 +75,14 @@ async function runGenome(genome) {
     }
   });
 
-  // Inject the NEAT brain IIFE
+  // Inject the NEAT brain IIFE and genome (pre-inject so genome is available at page-load time)
   await page.addInitScript(neatBrainSrc);
+  await page.addInitScript(`window.__NEAT_GENOME__ = ${JSON.stringify(genome.toJSON())};`);
 
   await page.goto(GAME_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
   await page.waitForTimeout(4000);
 
-  // ── Form filling (reused from smart-player-v912.js) ────────────────────
+  // ── Form filling — only clicks START_BUTTON if form is present ────────────
   async function fillAndSubmitForm() {
     await page.evaluate(() => {
       ['MODAL_BACKDROP', 'ADDITIONAL_TEXT_CONTAINER'].forEach(t => {
@@ -92,8 +93,22 @@ async function runGenome(genome) {
       if (f) { f.style.position = 'relative'; f.style.zIndex = '99999'; }
     });
 
-    await page.locator('[data-testid="START_BUTTON"]').click({ force: true });
-    await page.waitForTimeout(1500);
+    // Check whether the registration form is present BEFORE clicking START
+    // (clicking START on a returning player starts the round immediately)
+    const hasFormFirst = await page.evaluate(
+      () => !!document.querySelector('[data-testid="GAMEFORM_CONTAINER"]')
+    );
+
+    if (!hasFormFirst) {
+      // Try clicking START once in case form appears on first click
+      try {
+        await page.locator('[data-testid="START_BUTTON"]').click({ force: true, timeout: 2000 });
+        await page.waitForTimeout(1000);
+      } catch (_) {}
+    } else {
+      await page.locator('[data-testid="START_BUTTON"]').click({ force: true });
+      await page.waitForTimeout(1500);
+    }
 
     const hasForm = await page.evaluate(
       () => !!document.querySelector('[data-testid="GAMEFORM_CONTAINER"]')
@@ -131,11 +146,10 @@ async function runGenome(genome) {
   }
 
   await fillAndSubmitForm();
-  await page.waitForTimeout(2000);
+  await page.waitForTimeout(1000);
 
-  // Inject genome before round starts
-  const genomeSer = genome.toJSON();
-  await page.evaluate((g) => { window.__NEAT_GENOME__ = g; }, genomeSer);
+  // Genome already injected via addInitScript — confirm it's live in page
+  await page.evaluate((g) => { window.__NEAT_GENOME__ = g; }, genome.toJSON());
 
   // ── Click to start next round ──────────────────────────────────────────
   const waitStart = Date.now();
@@ -217,7 +231,7 @@ async function runGenome(genome) {
   return {
     genomeId:       genome.id,
     highestY:       ai.highestY        || 0,
-    score:          apiScore           || ai.score || 0,
+    score:          ai.score           || 0,   // use brain score, not API highScore (API returns account all-time best)
     trampolineHits: ai.trampolineHits  || 0,
     isCheater:      isCheater,
     durationMs:     durationMs,
