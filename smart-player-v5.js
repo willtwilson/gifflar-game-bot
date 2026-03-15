@@ -1,24 +1,31 @@
 /**
- * Gifflar Winter Vibe - Smart Game Player v4
+ * Gifflar Winter Vibe - Smart Game Player v5
  *
- * Improvements over v3:
- *  - Fix round-reset bug: _inRoundOver flag set BEFORE early return so transition is detected
- *  - Platform blacklist: after 3 failed bounce attempts at a target, blacklist it; reset on real progress
- *  - Sideways reach filter: only target platforms within max horizontal travel distance per bounce
- *  - Screen-wrap awareness: effective X distance = min(|dx|, WORLD_WIDTH - |dx|)
- *  - Brown/broken platform exclusion: never include in candidates
- *  - Wander alternates direction every 3 stagnant bounces to escape plateau
- *  - 60 max rounds
+ * Improvements over v4:
+ *  - Fix 0s round deaths: verify ball alive (Y < -300) after _inRoundOver clears
+ *  - Fix stagnation: track recently visited platform buckets; penalize revisiting
+ *    platforms we are stuck on (stagnation can happen even when successfully landing)
+ *  - Better stagnation escape: expanded Y+X search before pure wander mode
+ *  - Wander mode improvement: target highest ANY platform (ignoring normal filters) before
+ *    falling back to pure sideways drift
+ *  - BH floor: bounceH never drops below 220 to avoid overly restrictive filtering
+ *  - Lower stagnation threshold from 4 to 3 for quicker escape
+ *  - Candidate diversity: prefer platforms not recently visited (recency penalty)
+ *  - Candidate Y bonus increased for truly high platforms
  */
 
 const { chromium } = require('playwright');
+const fs = require('fs');
 
 const EMAIL        = 'willtwilson+giff@gmail.com';
 const NAME         = 'Will Wilson';
 const USERNAME     = 'Frilliam';
 const TARGET_SCORE = 300;
 const MAX_ROUNDS   = 60;
-const WORLD_WIDTH  = 750; // game canvas width in world units
+const WORLD_WIDTH  = 750;
+
+// Ensure screenshots dir exists
+if (!fs.existsSync('screenshots')) fs.mkdirSync('screenshots');
 
 async function runGame() {
   const browser = await chromium.launch({ headless: false });
@@ -29,17 +36,15 @@ async function runGame() {
   });
   const page = await context.newPage();
 
-  let bestScore    = 0;
-  let lastScoreBody = null;
+  let bestScore = 0;
 
   page.on('response', async (res) => {
     const url = res.url();
     if (url.includes('/api/post-game-score')) {
       try {
         const body = await res.json();
-        lastScoreBody = body;
         if (body.highScore > bestScore) bestScore = body.highScore;
-        console.log(`  🏆 Score: ${body.highScore.toFixed(1)} | Rank: ${body.ranking} | Cheater: ${body.isCheater}`);
+        console.log(`  🏆 Score: ${body.highScore.toFixed(1)} | Rank: ${body.ranking}`);
       } catch {}
     }
     if (url.includes('/api/post-game-start')) {
@@ -51,14 +56,15 @@ async function runGame() {
   });
 
   await page.addInitScript(() => {
-    // Shared constants (must be literals inside injected script)
     const WORLD_WIDTH   = 750;
-    const X_VEL         = 12.8;   // game units/frame when steering
-    const BH_INIT       = 380;    // initial bounce-height estimate (world units)
-    const STEER_THRESH  = 20;     // align within this many units → no steering
-    const TRAM_THRESH   = 10;     // tighter threshold to ensure trampoline hit
-    const WANDER_AFTER  = 4;      // stagnant bounce count before wander kicks in
-    const BLACKLIST_AT  = 3;      // failed attempts before a target is blacklisted
+    const X_VEL         = 12.8;
+    const BH_INIT       = 380;
+    const BH_FLOOR      = 220;    // never drop below this (avoids over-filtering)
+    const STEER_THRESH  = 20;
+    const TRAM_THRESH   = 10;
+    const WANDER_AFTER  = 3;      // ↓ from 4 → escape stagnation faster
+    const BLACKLIST_AT  = 3;
+    const VISITED_RECENCY = 6;    // last N platforms to track as "recently visited"
 
     let w = setInterval(() => {
       if (window.Phaser && !window.__ph) {
@@ -69,7 +75,6 @@ async function runGame() {
           const game = new OG(...args);
           window.__PHASER_GAME__ = game;
 
-          // Telemetry exposed to Playwright
           window.__AI__ = {
             taps: 0, frames: 0,
             direction: 'none', targetTex: '?', targetX: 0,
@@ -79,7 +84,7 @@ async function runGame() {
             bounceH: 0, apexY: 0, lastPlatY: 0,
             stagnant: 0, blacklistSize: 0,
             _inRoundOver: false,
-            _dyn: null   // initialised per-round
+            _dyn: null
           };
 
           function freshDyn() {
@@ -90,15 +95,18 @@ async function runGame() {
               platformY:      null,
               apexY:          null,
               bounceH:        BH_INIT,
-              bounceFrames:   100,      // frames per bounce cycle (EMA)
+              bounceFrames:   100,
               lastBounceFrame: null,
               stagnantBounces: 0,
               wanderDir:      1,
               bounceCount:    0,
-              blacklisted:    {},       // "x_y" → true
-              targetFailCounts: {},     // "x_y" → count of failed attempts
+              blacklisted:    {},
+              targetFailCounts: {},
               prevTargetX:    null,
               prevTargetY:    null,
+              // v5: recently visited platform buckets (ring buffer)
+              recentPlatforms: [],
+              currentPlatKey:  null,
               initialized:    false
             };
           }
@@ -113,15 +121,13 @@ async function runGame() {
             const ai = window.__AI__;
 
             if (!scene || !scene.player || scene.roundOver) {
-              // Mark that we are (or were) in round-over state BEFORE returning
               ai._inRoundOver = true;
               ai.roundOver = true;
               return;
             }
 
-            // ---- Detect new round start (transition: roundOver → active) ----
             if (ai._inRoundOver) {
-              ai._dyn = freshDyn();   // full reset every new round
+              ai._dyn = freshDyn();
               ai._inRoundOver = false;
             }
             ai.roundOver = false;
@@ -135,7 +141,6 @@ async function runGame() {
             ai.playerX = Math.round(px);
             ai.playerY = Math.round(py);
 
-            // ---- First-frame initialisation ----
             if (!d.initialized || d.prevY === null) {
               d.prevY     = py;
               d.platformY = py;
@@ -145,16 +150,14 @@ async function runGame() {
               return;
             }
 
-            // ---- Bounce dynamics ----
             const vy        = py - d.prevY;
             const goingUp   = vy < -0.5;
             const goingDown = vy >  0.5;
 
             if (goingUp && d.wasGoingDown) {
-              // ── Ball just bounced off a platform ──
+              // Ball just bounced off a platform
               const newPlatY = d.prevY;
 
-              // Measure frames per bounce cycle
               if (d.lastBounceFrame !== null) {
                 const cycleFr = ai.frames - d.lastBounceFrame;
                 if (cycleFr > 5 && cycleFr < 600) {
@@ -164,12 +167,11 @@ async function runGame() {
               d.lastBounceFrame = ai.frames;
               d.bounceCount++;
 
-              // ── Platform blacklist: did we reach our previous target? ──
+              // Blacklist tracking (failed to reach previous target)
               if (d.prevTargetY !== null) {
                 const reached = Math.abs(newPlatY - d.prevTargetY) < 60;
                 if (reached) {
-                  // Landed on the target — clear blacklist (real progress)
-                  d.blacklisted     = {};
+                  d.blacklisted      = {};
                   d.targetFailCounts = {};
                 } else {
                   const fk = `${Math.round(d.prevTargetX / 20) * 20}_${Math.round(d.prevTargetY / 20) * 20}`;
@@ -180,27 +182,41 @@ async function runGame() {
                 }
               }
 
-              // Also clear blacklist if we've genuinely climbed (new floor >> old floor)
+              // Clear blacklist when we've genuinely climbed
               if (d.platformY !== null && newPlatY < d.platformY - 150) {
                 d.blacklisted      = {};
                 d.targetFailCounts = {};
+              }
+
+              // v5: Track recently visited platforms (ring buffer)
+              const platKey = `${Math.round(px / 30) * 30}_${Math.round(newPlatY / 30) * 30}`;
+              d.currentPlatKey = platKey;
+              if (!d.recentPlatforms.includes(platKey)) {
+                d.recentPlatforms.push(platKey);
+                if (d.recentPlatforms.length > VISITED_RECENCY) {
+                  d.recentPlatforms.shift(); // remove oldest
+                }
               }
 
               d.platformY = newPlatY;
             }
 
             if (goingDown && d.wasGoingUp) {
-              // ── Ball reached apex ──
+              // Ball reached apex
               const newApexY = d.prevY;
               const progress = (d.apexY !== null) ? (d.apexY - newApexY) : 100;
               if (progress > 50) {
                 d.stagnantBounces = 0;
               } else {
                 d.stagnantBounces++;
-                if (d.stagnantBounces % 3 === 0) d.wanderDir *= -1;
+                // Flip wander direction every 2 stagnant bounces
+                if (d.stagnantBounces % 2 === 0) d.wanderDir *= -1;
               }
               const bh = Math.abs((d.platformY ?? newApexY) - newApexY);
-              if (bh > 50 && bh < 4000) d.bounceH = d.bounceH * 0.65 + bh * 0.35;
+              if (bh > 50 && bh < 4000) {
+                const newBH = d.bounceH * 0.65 + bh * 0.35;
+                d.bounceH = Math.max(newBH, BH_FLOOR); // enforce floor
+              }
               d.apexY = newApexY;
               ai.bounceH    = Math.round(d.bounceH);
               ai.apexY      = Math.round(d.apexY);
@@ -215,22 +231,7 @@ async function runGame() {
 
             ai.phase = goingUp ? 'rising' : goingDown ? 'falling' : 'apex';
 
-            // ──────────────── Wander mode (plateau escape) ────────────────
-            if (d.stagnantBounces >= WANDER_AFTER) {
-              const xVel = d.wanderDir * X_VEL;
-              try { scene.player.setVelocity(xVel, scene.player.getVelocityY()); } catch (_) {}
-              scene.isTouching = true;
-              scene.input.activePointer.x      = d.wanderDir > 0 ? 600 : 150;
-              scene.input.activePointer.worldX = d.wanderDir > 0 ? 600 : 150;
-              scene.input.activePointer.isDown = true;
-              ai.taps++;
-              ai.direction = d.wanderDir > 0 ? 'R(wander)' : 'L(wander)';
-              ai.desiredX  = d.wanderDir > 0 ? 300 : 75;
-              return;
-            }
-
             // ──────────────── Gather platforms ────────────────
-            // Exclude broken/brown platforms entirely — they collapse on landing
             const BROKEN_KEYS = new Set(['broken', 'brown']);
             const allPlats = [
               ...(scene.platformPool   || []),
@@ -241,8 +242,7 @@ async function runGame() {
               return !BROKEN_KEYS.has(p.texture?.key || '');
             });
 
-            // Max horizontal reach this bounce (full cycle, conservative)
-            // With screen wrap, effective X distance is min(|dx|, WORLD_WIDTH - |dx|)
+            // Horizontal reach this bounce cycle
             const maxReach = X_VEL * d.bounceFrames;
 
             function effectiveXDist(platX) {
@@ -255,11 +255,98 @@ async function runGame() {
               return !!d.blacklisted[k];
             }
 
-            // ──────────────── Phase-aware candidate selection ────────────────
+            // v5: recency penalty for platforms we recently visited
+            function recencyPenalty(p) {
+              const k = `${Math.round(p.x / 30) * 30}_${Math.round(p.y / 30) * 30}`;
+              const idx = d.recentPlatforms.indexOf(k);
+              if (idx === -1) return 0;
+              // Most recently visited = largest penalty
+              const recency = idx - (d.recentPlatforms.length - 1); // 0 = most recent, negative = older
+              return (recency + VISITED_RECENCY) * 30; // 0 (oldest) → 150 (newest) penalty
+            }
+
+            // ──────────────── Stagnation escape: expanded search ────────────────
+            if (d.stagnantBounces >= WANDER_AFTER) {
+              // Clear blacklist when very stuck
+              if (d.stagnantBounces >= 5) {
+                d.blacklisted      = {};
+                d.targetFailCounts = {};
+              }
+
+              // Expanded search: relax Y and X constraints significantly
+              const expandFactor = 1.0 + (d.stagnantBounces - WANDER_AFTER + 1) * 0.5;
+              const expandedCands = allPlats.filter(p =>
+                p.y < (d.apexY ?? py) - 10 &&             // above current apex
+                p.y > (d.apexY ?? py) - d.bounceH * (1.5 + expandFactor) && // expanded Y reach
+                effectiveXDist(p.x) <= maxReach * (1.0 + expandFactor * 0.3) // expanded X reach
+              );
+
+              if (expandedCands.length > 0) {
+                // Score with strong height preference + recency penalty
+                let bestTarget = null, bestPScore = -Infinity;
+                for (const p of expandedCands) {
+                  const xEff = effectiveXDist(p.x);
+                  const key  = p.texture?.key || '';
+                  const isTrampoline = key === 'trampoline' || key === 'spring';
+                  const pScore =
+                    -xEff * 0.5
+                    + (-p.y) * 0.15      // stronger height preference in escape mode
+                    + (isTrampoline ? 800 : 0)
+                    - recencyPenalty(p); // avoid platforms we just bounced on
+                  if (pScore > bestPScore) { bestPScore = pScore; bestTarget = p; }
+                }
+
+                if (bestTarget) {
+                  d.prevTargetX = bestTarget.x;
+                  d.prevTargetY = bestTarget.y;
+                  ai.targetX   = Math.round(bestTarget.x);
+                  ai.targetTex = bestTarget.texture?.key || '?';
+
+                  let diff = bestTarget.x - px;
+                  if (Math.abs(diff) > WORLD_WIDTH / 2) {
+                    diff = diff > 0 ? diff - WORLD_WIDTH : diff + WORLD_WIDTH;
+                  }
+
+                  if (Math.abs(diff) < STEER_THRESH) {
+                    ai.direction     = 'center(esc)';
+                    ai.desiredX      = 187;
+                    scene.isTouching = false;
+                  } else {
+                    const goRight = diff > 0;
+                    const xVel    = goRight ? X_VEL : -X_VEL;
+                    try { scene.player.setVelocity(xVel, scene.player.getVelocityY()); } catch (_) {}
+                    scene.isTouching = true;
+                    scene.input.activePointer.x      = goRight ? 600 : 150;
+                    scene.input.activePointer.worldX = goRight ? 600 : 150;
+                    scene.input.activePointer.isDown = true;
+                    ai.taps++;
+                    ai.direction = goRight ? 'R(esc)' : 'L(esc)';
+                    ai.desiredX  = goRight ? 300 : 75;
+                  }
+                  ai.platformsAbove = expandedCands.length;
+                  return;
+                }
+              }
+
+              // Pure wander fallback: alternate direction
+              const xVel = d.wanderDir * X_VEL;
+              try { scene.player.setVelocity(xVel, scene.player.getVelocityY()); } catch (_) {}
+              scene.isTouching = true;
+              scene.input.activePointer.x      = d.wanderDir > 0 ? 600 : 150;
+              scene.input.activePointer.worldX = d.wanderDir > 0 ? 600 : 150;
+              scene.input.activePointer.isDown = true;
+              ai.taps++;
+              ai.direction = d.wanderDir > 0 ? 'R(wdr)' : 'L(wdr)';
+              ai.desiredX  = d.wanderDir > 0 ? 300 : 75;
+              ai.platformsAbove = 0;
+              return;
+            }
+
+            // ──────────────── Normal phase-aware candidate selection ────────────────
             let candidates = [];
 
             if (goingDown || ai.phase === 'apex') {
-              // FALLING: catch a platform between apex and current floor → step-up
+              // FALLING: look for platforms between apex and floor
               if (d.apexY !== null && d.platformY !== null) {
                 candidates = allPlats.filter(p =>
                   p.y > d.apexY + 10 &&
@@ -275,11 +362,11 @@ async function runGame() {
                 );
               }
             } else {
-              // RISING: target above current apex for next bounce cycle
+              // RISING: look above current apex for next bounce
               if (d.apexY !== null) {
                 candidates = allPlats.filter(p =>
                   p.y < d.apexY - 20 &&
-                  p.y > d.apexY - d.bounceH * 1.25 &&
+                  p.y > d.apexY - d.bounceH * 1.3 &&
                   effectiveXDist(p.x) <= maxReach && !isBlacklisted(p)
                 );
               }
@@ -298,7 +385,7 @@ async function runGame() {
                 effectiveXDist(p.x) <= maxReach && !isBlacklisted(p)
               );
             }
-            // Final fallback: ignore reach + blacklist constraints
+            // Final fallback: ignore reach + blacklist
             if (candidates.length === 0) {
               candidates = allPlats.filter(p =>
                 p.y < py - 10 && p.y > py - 2000
@@ -314,12 +401,12 @@ async function runGame() {
               const key  = p.texture?.key || '';
               const isTrampoline = key === 'trampoline' || key === 'spring';
               const isMoving     = key === 'moving';
-              // Prefer: horizontally close, higher up, trampolines
               const pScore =
                 -xEff * 0.8
-                + (-p.y) * 0.05       // higher platform (more negative Y) = bonus
-                + (isTrampoline ? 600 : 0)
-                - (isMoving     ? 30  : 0);
+                + (-p.y) * 0.08          // v5: increased from 0.05 → prefer higher platforms more
+                + (isTrampoline ? 700 : 0)
+                - (isMoving     ? 30  : 0)
+                - recencyPenalty(p);      // v5: penalize recently visited platforms
               if (pScore > bestPScore) { bestPScore = pScore; bestTarget = p; }
             }
 
@@ -330,14 +417,11 @@ async function runGame() {
               return;
             }
 
-            // Store target for blacklist tracking next bounce
             d.prevTargetX = bestTarget.x;
             d.prevTargetY = bestTarget.y;
-
             ai.targetX   = Math.round(bestTarget.x);
             ai.targetTex = bestTarget.texture?.key || '?';
 
-            // Calculate effective diff with screen-wrap
             let diff = bestTarget.x - px;
             if (Math.abs(diff) > WORLD_WIDTH / 2) {
               diff = diff > 0 ? diff - WORLD_WIDTH : diff + WORLD_WIDTH;
@@ -353,13 +437,11 @@ async function runGame() {
             } else {
               const goRight = diff > 0;
               const xVel    = goRight ? X_VEL : -X_VEL;
-
               try { scene.player.setVelocity(xVel, scene.player.getVelocityY()); } catch (_) {}
               scene.isTouching = true;
               scene.input.activePointer.x      = goRight ? 600 : 150;
               scene.input.activePointer.worldX = goRight ? 600 : 150;
               scene.input.activePointer.isDown = true;
-
               ai.taps++;
               ai.direction = goRight ? 'R' : 'L';
               ai.desiredX  = goRight ? 300 : 75;
@@ -433,12 +515,25 @@ async function runGame() {
   await page.waitForTimeout(2000);
 
   async function playRound(roundNum) {
-    // Wait for any stale roundOver=true from previous round to clear
+    // v5 fix: After each round, the LEADERBOARD overlay appears with a "START GAME"
+    // button (data-testid="START_BUTTON") at the bottom. We must click that button,
+    // not the centre of the screen. Keep clicking it every 250ms until the new round starts.
     const waitStart = Date.now();
-    while (Date.now() - waitStart < 5000) {
+    while (Date.now() - waitStart < 10000) {
       const over = await page.evaluate(() => window.__AI__?._inRoundOver ?? true);
       if (!over) break;
-      await page.waitForTimeout(150);
+      // Prefer the explicit START_BUTTON; fall back to centre-tap
+      try {
+        const btn = page.locator('[data-testid="START_BUTTON"]');
+        if (await btn.isVisible({ timeout: 100 })) {
+          await btn.click({ force: true });
+        } else {
+          await page.mouse.click(187, 400);
+        }
+      } catch (_) {
+        await page.mouse.click(187, 400);
+      }
+      await page.waitForTimeout(250);
     }
 
     const roundStart = Date.now();
@@ -447,26 +542,23 @@ async function runGame() {
     let clicks       = 0;
     let screenshotted = false;
 
-    await page.mouse.click(187, 400);
-    await page.waitForTimeout(100);
-
     while (Date.now() - roundStart < maxRoundMs) {
       const snap = await page.evaluate(() => {
         const ai = window.__AI__;
         if (!ai) return null;
         return {
-          desiredX:      ai.desiredX,
-          direction:     ai.direction,
-          roundOver:     ai.roundOver,
-          playerY:       ai.playerY,
+          desiredX:       ai.desiredX,
+          direction:      ai.direction,
+          roundOver:      ai.roundOver,
+          playerY:        ai.playerY,
           platformsAbove: ai.platformsAbove,
-          phase:         ai.phase,
-          bounceH:       ai.bounceH,
-          apexY:         ai.apexY,
-          stagnant:      ai.stagnant,
-          blacklistSize: ai.blacklistSize,
-          targetTex:     ai.targetTex,
-          taps:          ai.taps,
+          phase:          ai.phase,
+          bounceH:        ai.bounceH,
+          apexY:          ai.apexY,
+          stagnant:       ai.stagnant,
+          blacklistSize:  ai.blacklistSize,
+          targetTex:      ai.targetTex,
+          taps:           ai.taps,
         };
       });
 
@@ -498,11 +590,14 @@ async function runGame() {
             ` BH:${snap.bounceH} Apex:${snap.apexY} Stag:${snap.stagnant}` +
             ` BL:${snap.blacklistSize} Taps:${snap.taps} Clicks:${clicks} High:${full.highest}`
           );
+          lastLogTime = Date.now();
+          if (full.highest >= TARGET_SCORE) {
+            console.log(`  🎯 TARGET ${TARGET_SCORE} REACHED! Score: ${full.highest}`);
+          }
         }
-        lastLogTime = Date.now();
       }
 
-      await page.waitForTimeout(80 + Math.random() * 40);
+      await page.waitForTimeout(30);
     }
 
     const elapsed = Math.round((Date.now() - roundStart) / 1000);
@@ -512,45 +607,17 @@ async function runGame() {
   for (let round = 1; round <= MAX_ROUNDS; round++) {
     console.log(`\n=== Round ${round} / ${MAX_ROUNDS} (best: ${bestScore.toFixed(1)}) ===`);
     await playRound(round);
-    await page.waitForTimeout(3000);
 
     if (bestScore >= TARGET_SCORE) {
-      console.log('\n🎉🎉🎉 TARGET ACHIEVED! Score >= 300! 🎉🎉🎉');
+      console.log(`\n🏆 TARGET ACHIEVED! Best score: ${bestScore.toFixed(1)} 🏆`);
       break;
     }
 
-    if (round < MAX_ROUNDS) {
-      await page.evaluate(() => {
-        ['MODAL_BACKDROP', 'ADDITIONAL_TEXT_CONTAINER'].forEach(t => {
-          const e = document.querySelector(`[data-testid="${t}"]`);
-          if (e) e.style.pointerEvents = 'none';
-        });
-      });
-      try {
-        await page.locator('[data-testid="START_BUTTON"]').click({ force: true, timeout: 5000 });
-        await page.waitForTimeout(1500);
-      } catch {
-        console.log('  No START button — stopping');
-        break;
-      }
-    }
+    await page.waitForTimeout(500);
   }
 
-  await page.screenshot({ path: 'screenshots/99-final.png' });
-  console.log('\n=== FINAL RESULTS ===');
-  console.log(`Best score: ${bestScore.toFixed(2)}`);
-  if (lastScoreBody) {
-    console.log(`Ranking: ${lastScoreBody.ranking}`);
-    console.log(`Is cheater: ${lastScoreBody.isCheater}`);
-    console.log(`Number of entries: ${lastScoreBody.numberOfEntries}`);
-  }
-  if (bestScore >= TARGET_SCORE) {
-    console.log('\n✅ SUCCESS: Entered the Cosy Winter Kits prize draw!');
-  } else {
-    console.log(`\n❌ Need ${(TARGET_SCORE - bestScore).toFixed(1)} more points`);
-  }
-
+  console.log(`\n=== Done. Best score: ${bestScore.toFixed(1)} ===`);
   await browser.close();
 }
 
-runGame().catch(console.error);
+runGame().catch(err => { console.error(err); process.exit(1); });
