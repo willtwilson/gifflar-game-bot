@@ -330,11 +330,13 @@ async function runGame() {
                 d.targetFailCounts = {};
               }
 
-              // Expanded search: relax Y and X constraints
+              // Expanded search: relax X constraint; keep Y in reachable range
+              // Bug fix: original filter was p.y < apexY (above apex = unreachable).
+              // Now use: platforms reachable from current position within expandFactor*BH.
               const expandFactor = 1.0 + (d.stagnantBounces - WANDER_AFTER + 1) * 0.5;
               const expandedCands = allPlats.filter(p =>
-                p.y < (d.apexY ?? py) - 10 &&
-                p.y > (d.apexY ?? py) - d.bounceH * Math.min(2.0 + expandFactor, 5.0) &&
+                p.y < py + 50 &&                                          // below/near ball
+                p.y > py - d.bounceH * Math.min(expandFactor, 3.0) &&    // within reach
                 effectiveXDist(p.x) <= maxReach * (1.0 + expandFactor * 0.3)
               );
 
@@ -345,12 +347,14 @@ async function runGame() {
                   const key  = p.texture?.key || '';
                   const isTrampoline = key === 'trampoline' || key === 'spring';
                   // v9.2: same trampoline escape penalty in wander mode
+                  // Use 0.3/0.3 in wander (not 0.4/0.2) so nearby reachable platforms
+                  // compete fairly; height-priority is only for the normal scoring path.
                   const tramBonus = isTrampoline
                     ? (d.consecutiveTrampolineBounces >= 3 ? -2000 : 800)
                     : 0;
                   const pScore =
-                    -xEff * 0.2       // v9.2: distance weight 0.3 → 0.2
-                    + (-p.y) * 0.4    // v9.2: height weight 0.3 → 0.4
+                    -xEff * 0.3
+                    + (-p.y) * 0.3
                     + tramBonus
                     - recencyPenalty(p);
                   if (pScore > bestPScore) { bestPScore = pScore; bestTarget = p; }
@@ -491,8 +495,8 @@ async function runGame() {
                 ? (d.consecutiveTrampolineBounces >= 3 ? -2000 : 1200)
                 : 0;
               const pScore =
-                -xEff * 0.2       // v9.2: distance weight 0.3 → 0.2
-                + (-p.y) * 0.4    // v9.2: height weight 0.3 → 0.4
+                -xEff * 0.3       // keep original distance weight (0.4/0.2 was too aggressive)
+                + (-p.y) * 0.3    // keep original height weight
                 + tramBonus
                 - (isMoving ? 30 : 0);
               if (pScore > bestPScore) { bestPScore = pScore; bestTarget = p; }
@@ -547,7 +551,7 @@ async function runGame() {
     }, 10);
   });
 
-  console.log('=== Loading game (v9.2 — trampoline escape + 120s rounds + height-priority scoring) ===');
+  console.log('=== Loading game (v9.2b — trampoline escape + 120s rounds + wander fix) ===');
   await page.goto(
     'https://game.flarie.com/games/capriole/d9e33c9b-d082-4232-919e-29901343c54f',
     { waitUntil: 'networkidle', timeout: 30000 }
