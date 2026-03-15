@@ -14,7 +14,7 @@
 function calcFitness({ highestY, score, trampolineHits, isCheater, durationMs }) {
   if (isCheater) return 0;
   const heightScore = Math.max(0, -highestY) * 0.1;
-  const scoreBonus  = score * 2;
+  const scoreBonus  = score * 5;               // raised from ×2: fitness≈2000 when matching rule-based record
   const trampBonus  = trampolineHits * 50;
   const timePenalty = durationMs > 120000 ? -50 : 0;
   return heightScore + scoreBonus + trampBonus + timePenalty;

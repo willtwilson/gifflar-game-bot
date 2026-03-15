@@ -1,7 +1,7 @@
 module.exports = {
   populationSize: 20,
   maxGenerations: 200,
-  targetFitness: 300,
+  targetFitness: 2000,   // ~score 400 sustained; well above rule-based 342.1
   inputs: 9,
   outputs: 3,
   compatibilityThreshold: 3.0,

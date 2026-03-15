@@ -189,7 +189,7 @@ class Population {
   static fromJSON(data, config, innovationTracker) {
     const pop = new Population(config, innovationTracker);
     pop.generation  = data.generation;
-    pop.bestFitness = data.bestFitness;
+    pop.bestFitness = data.bestFitness ?? -Infinity;
     pop.bestGenome  = data.bestGenome ? Genome.fromJSON(data.bestGenome, config) : null;
     pop.genomes     = data.genomes.map(g => Genome.fromJSON(g, config));
 

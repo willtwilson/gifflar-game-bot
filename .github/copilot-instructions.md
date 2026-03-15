@@ -4,6 +4,7 @@
 - **🏆 MISSION ACHIEVED**: 342.1 points, Rank 559 (v9.11, March 2026) — prize draw entered
 - **Target**: 300+ points to enter prize draw ✅ Done
 - **Next goal**: Beat 342.1 using NEAT neuroevolution (training in progress)
+- **NEAT Gen 1 best**: 34.1 score / 452.6 fitness (g1012) — Gen 1 complete, training continuing
 - **Game URL**: https://game.flarie.com/games/capriole/d9e33c9b-d082-4232-919e-29901343c54f
 - **Credentials**: Email `willtwilson+giff@gmail.com` | Username `Frilliam` | Name `Will Wilson`
 
@@ -15,9 +16,11 @@
 - **Architecture**: Playwright + Phaser step injection; deterministic scoring heuristics
 
 ### 2. NEAT Neural Network Bot (experimental, training)
-- **Run**: `npm run neat` (training loop) | `npm run neat-analyse` (stats) | `npm run dashboard` (live viz)
+- **Run**: `npm run neat` (training loop) | `npm run neat-headful` (visible browser) | `npm run neat-analyse` (stats) | `npm run dashboard` (live viz)
+- **Resume**: `npm run neat-resume` (headless) | `npm run neat-resume-headful` (visible browser)
 - **Architecture**: Pure-JS NEAT evolution — genomes evolve toward high scores over generations
-- **Checkpoint**: `neat-checkpoint.json` (save/resume) | `neat-results.jsonl` (per-genome telemetry)
+- **Checkpoint**: `neat-checkpoint.json` (save/resume after every genome) | `neat-results.jsonl` (per-genome telemetry)
+- **Key**: Checkpoint saves after EVERY genome — crash mid-generation? Use `--resume` to continue from exact genome
 
 ## Game Architecture
 
@@ -34,6 +37,11 @@
 | `moving` | Slides left/right | ✅ Yes (penalty -150) |
 | `trampoline`/`spring` | Huge boost (~600 units) | ✅ Top priority (+1000) |
 | `broken`/`brown` | Collapses on landing | ❌ Never |
+
+### Game Bonuses (NEAT should discover these naturally via score signal)
+- **Balloons**: Collectible sprites that boost score — visible in scene, texture key TBD
+- **Other sprites**: Various bonus collectibles exist; NEAT evolves to find them via score feedback
+- **Screen wrap**: Ball teleports through left/right walls — critical for reaching distant platforms
 
 ### Steering (input simulation only — no setVelocity)
 ```javascript
@@ -95,13 +103,14 @@ else                             → NONE  (isTouching = false)
 calcFitness = ({ highestY, score, trampolineHits, isCheater, durationMs }) => {
   if (isCheater) return 0;
   return Math.max(0,
-    Math.max(0, -highestY) * 0.1  // height bonus
-    + score * 2                    // score bonus
+    Math.max(0, -highestY) * 0.1  // height bonus (~384 for score=34)
+    + score * 5                    // score bonus — calibrated so rule-based (342pts) ≈ fitness 2000
     + trampolineHits * 50          // trampoline bonus
     - (durationMs > 120000 ? 50 : 0) // slow run penalty
   );
 }
 ```
+**Calibration**: score=342 (rule-based record) → fitness ≈ 2000. `targetFitness = 2000`.
 
 ### Speciation
 - Compatibility threshold: 3.0 (c1=1.0, c2=1.0, c3=0.4)
@@ -154,6 +163,11 @@ npm run dashboard            # live dashboard at localhost:3000
 3. **World-wrap is real**: Ball teleports left→right; use effectiveXDist() everywhere
 4. **isCheater never triggered**: setVelocity alongside pointer simulation seems tolerated, but removing it is safer for NEAT
 5. **NEAT gen 1**: Expect near-zero scores. Watch for improvement from gen 3–5 onwards
+6. **Shared browser context**: Reuse one Playwright browser+context across all genome runs — saves ~5-8s per genome, avoids repeated login, reduces bot-detection risk
+7. **Mid-gen checkpointing**: Always save checkpoint after every genome (not just end-of-gen) — crashes are recoverable with `--resume`
+8. **Fitness calibration**: With `score × 5`, fitness ≈ 2000 maps to matching the rule-based record. Gen 1 random init typically scores 0–34 pts
+9. **Balloons & bonuses**: Game has collectible sprites beyond trampolines. NEAT should discover these naturally via score signal — do NOT hardcode detection (let evolution find them)
+10. **NEAT browser visibility**: Use `--headful` flag to watch training runs in browser — useful for debugging and monitoring
 
 ## Game Architecture
 
