@@ -14,6 +14,7 @@
     "neat-resume": "node scripts/neat-play.js --resume",
     "neat-resume-headful": "node scripts/neat-play.js --resume --headful",
     "neat-analyse": "node scripts/neat-analyse.js",
+    "neat-monitor": "node scripts/neat-monitor.js",
     "dashboard": "node scripts/dashboard-server.js"
   },
   "keywords": [],

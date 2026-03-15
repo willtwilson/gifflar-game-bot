@@ -192,17 +192,28 @@ async function runGenome(context, genome) {
   const roundStart  = Date.now();
   const MAX_ROUND_MS = 90000;
   const MIN_ROUND_MS = 5000;
+  const SCORE_STAGNATION_MS = 12000; // exit if score doesn't improve for 12 s
+
+  let lastScore = -1;
+  let lastScoreChangeMs = Date.now();
 
   while (Date.now() - roundStart < MAX_ROUND_MS) {
     const snap = await page.evaluate(() => {
       const g = window.__PHASER_GAME__;
       const s = g?.scene?.scenes?.find(sc => sc.sys?.settings?.key === 'GAME_SCENE');
-      if (!s) return { roundOver: true };
+      if (!s) return { roundOver: true, stagnantBounces: 0, score: 0 };
       return {
         roundOver:       !!s.roundOver,
         stagnantBounces: window.__NEAT_AI__?.stagnantBounces || 0,
+        score:           window.__NEAT_AI__?.score || 0,
       };
     });
+
+    // Score progress tracking — reset timer whenever score improves
+    if (snap.score !== lastScore) {
+      lastScore = snap.score;
+      lastScoreChangeMs = Date.now();
+    }
 
     if (snap.roundOver && (Date.now() - roundStart) > MIN_ROUND_MS) {
       // Double-check to avoid transient false positives
@@ -215,8 +226,22 @@ async function runGenome(context, genome) {
       if (stillOver) break;
     }
 
-    // Force-exit on extreme stagnation
+    // Force-exit on extreme bounce stagnation
     if (snap.stagnantBounces > 15 && (Date.now() - roundStart) > MIN_ROUND_MS) {
+      await page.evaluate(() => {
+        const g = window.__PHASER_GAME__;
+        const s = g?.scene?.scenes?.find(sc => sc.sys?.settings?.key === 'GAME_SCENE');
+        if (s?.player && s.cameras?.main) {
+          const belowScreen = s.cameras.main.scrollY + s.cameras.main.height + 200;
+          try { s.player.setPosition(s.player.x, belowScreen); } catch (_) {}
+        }
+      });
+      await page.waitForTimeout(800);
+      break;
+    }
+
+    // Force-exit when score has not improved for SCORE_STAGNATION_MS (ball stuck bouncing in place)
+    if ((Date.now() - lastScoreChangeMs) > SCORE_STAGNATION_MS && (Date.now() - roundStart) > MIN_ROUND_MS) {
       await page.evaluate(() => {
         const g = window.__PHASER_GAME__;
         const s = g?.scene?.scenes?.find(sc => sc.sys?.settings?.key === 'GAME_SCENE');
