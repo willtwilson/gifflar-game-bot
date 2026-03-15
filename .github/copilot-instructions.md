@@ -140,7 +140,7 @@ if (goingUp || goingDown) {
 - Must click DURING the wait loop, not after it exits
 
 ### Form submission (one-time, on fresh account)
-- Email: `gifflar-bot@example.com` | Name: `GifflarBot` | Username: `GifflarBot`
+- Email: `<EMAIL>` | Name: `<NAME>` | Username: `<USERNAME>` (set via `EMAIL`/`NAME`/`USERNAME` env vars)
 - React checkbox hack: `cb[reactPropsKey].onChange({ target: { checked: true } })`
 - React form submit: call `form[reactPropsKey].onSubmit(fakeEvent)`
 
