@@ -1,170 +1,160 @@
 # Gifflar Winter Vibe Game Bot — Copilot Instructions
 
-## Project Purpose
-Automate the Gifflar "Winter Vibe" Flarie platform game (Doodle Jump-style) to achieve 300+ points and enter a prize draw. The game URL is https://game.flarie.com/games/capriole/d9e33c9b-d082-4232-919e-29901343c54f
+## Project Status
+- **🏆 MISSION ACHIEVED**: 342.1 points, Rank 559 (v9.11, March 2026) — prize draw entered
+- **Target**: 300+ points to enter prize draw ✅ Done
+- **Next goal**: Beat 342.1 using NEAT neuroevolution (training in progress)
+- **Game URL**: https://game.flarie.com/games/capriole/d9e33c9b-d082-4232-919e-29901343c54f
+- **Credentials**: Email `willtwilson+giff@gmail.com` | Username `Frilliam` | Name `Will Wilson`
 
-## Current Status (v9.3)
-- **Bot record**: High:112 (round 23, 42s) — from multiple deterministic runs
-- **API best**: 220.1 (historical, origin uncertain — possibly v4–v6 era)
-- **Target**: 300+ points to enter prize draw
-- **Seeds are deterministic**: Round 23 always gives the best seed (~112 pts); rounds 35, 36 give ~92-94 pts
-- **Key insight**: Early code (v1-v3) used simpler "nearest platform above" selection and achieved 220; v9's complex scoring may be over-engineering
+## Two Parallel Approaches
+
+### 1. Rule-Based Bot (stable, production)
+- **Best file**: `smart-player-v912.js` — achieved 342.1 pts
+- **Run**: `node smart-player-v912.js`
+- **Architecture**: Playwright + Phaser step injection; deterministic scoring heuristics
+
+### 2. NEAT Neural Network Bot (experimental, training)
+- **Run**: `npm run neat` (training loop) | `npm run neat-analyse` (stats) | `npm run dashboard` (live viz)
+- **Architecture**: Pure-JS NEAT evolution — genomes evolve toward high scores over generations
+- **Checkpoint**: `neat-checkpoint.json` (save/resume) | `neat-results.jsonl` (per-genome telemetry)
 
 ## Game Architecture
 
 ### Engine
 - **Phaser 3.55.2** with custom `Flarie.Fysics` physics engine
 - Canvas 750×1334 world units, viewport 375×667 (2x retina on mobile UA)
-- **Y-axis**: increases DOWNWARD (Phaser convention). More negative Y = higher up = better score
-- `scene.highestPointReached` = game score (≈1 point per ~100 world units climbed)
+- **Y-axis**: increases DOWNWARD. More negative Y = higher = better score
+- `scene.highestPointReached` = game score (≈1 pt per ~100 world units climbed)
 
 ### Platform Types
-| Texture key | Behaviour | Bot should target? |
-|-------------|-----------|-------------------|
+| Texture key | Behaviour | Target? |
+|-------------|-----------|---------|
 | `regular` | Normal bounce | ✅ Yes |
-| `moving` | Slides left/right | ✅ Yes (small penalty) |
-| `trampoline`/`spring` | Huge boost (~600 world units) | ✅ High priority (+700 score bonus) |
-| `broken`/`brown` | Collapses on landing | ❌ NEVER target |
+| `moving` | Slides left/right | ✅ Yes (penalty -150) |
+| `trampoline`/`spring` | Huge boost (~600 units) | ✅ Top priority (+1000) |
+| `broken`/`brown` | Collapses on landing | ❌ Never |
 
-### Steering Mechanism
+### Steering (input simulation only — no setVelocity)
 ```javascript
-// Game reads pointer position each frame:
-if (scene.isTouching) {
-  velocity = (pointer.x < 375 ? -3.2 : 3.2) * 4; // ±12.8 units/frame
-}
-// Bot overrides directly:
-scene.player.setVelocity(±12.8, scene.player.getVelocityY());
+// Steer LEFT:
 scene.isTouching = true;
-scene.input.activePointer.x = goRight ? 600 : 150;
+scene.input.activePointer.x = 100;
+scene.input.activePointer.worldX = 100;
+scene.input.activePointer.isDown = true;
+// Steer RIGHT: pointer.x = 600
+// Release: scene.isTouching = false; pointer.isDown = false;
 ```
+**NEVER use `scene.player.setVelocity()` — triggers isCheater in API.**
 
 ### Screen Wrap
-- Ball wraps at X boundaries (left→right, right→left)
-- `effectiveXDist = Math.min(Math.abs(dx), WORLD_WIDTH - Math.abs(dx))`
-- Wrap-corrected steering: `if (Math.abs(diff) > 375) diff -= 750 * Math.sign(diff)`
+- Ball wraps at X=0 / X=750 boundaries
+- `effectiveXDist(platX) = Math.min(|platX - px|, 750 - |platX - px|)`
 
-## Bot Architecture (Node.js + Playwright)
+## NEAT Architecture
 
-### Key files
-| File | Description |
-|------|-------------|
-| `smart-player-v9.js` | **Current bot** (v9.3 — phase-aware fallbacks); High:112 bot record |
-| `smart-player-v6.js` | Previous best; score-based stagnation detection |
-| `smart-player-v5.js` | Fixed leaderboard overlay bug (START_BUTTON); no more 0s rounds |
-| `test-ai-logic.js` | 25 unit tests for pure AI logic (run with `node test-ai-logic.js`) |
-| `analyze-run.js` | Helper: extract peak High scores from a run log file |
+### File Map
+```
+neat/
+  neat-config.js      ← Hyperparameters (pop=20, inputs=9, outputs=3)
+  genome.js           ← Genome: nodes, connections, mutate(), crossover(), compatibility()
+  innovation.js       ← Global innovation number singleton (persists across generations)
+  network.js          ← Feed-forward evaluator: topological sort + sigmoid
+  population.js       ← Speciation, adjusted fitness, generational evolution
+  fitness.js          ← calcFitness({highestY, score, trampolineHits, isCheater, durationMs})
+lib/
+  neat-brain.js       ← Browser IIFE (addInitScript): 9-input vector → network.forward() → steer
+scripts/
+  neat-play.js        ← Training orchestrator (--resume flag, neat-checkpoint.json)
+  neat-analyse.js     ← Reads neat-results.jsonl, prints learning curve
+  dashboard-server.js ← Live HTTP dashboard at localhost:3000
+```
 
-### How the bot works
-1. **`addInitScript`**: Injects AI code into the Phaser game via `Phaser.Game` constructor hook
-2. **Step hook**: Runs every game frame (60fps) via `game.events.on('step', ...)`
-3. **State bridge**: `window.__AI__` exposes game state (playerY, bounceH, phase, stagnant, etc.) to Node.js
-4. **Node.js loop**: Every 80ms reads `window.__AI__`, clicks at `desiredX` to simulate touch
+### NEAT Input Vector (9 inputs, normalised -1..1)
+```
+[0] playerX / 375
+[1] playerVelocityX / 20
+[2] playerVelocityY / 30       ← negative = rising
+[3] (plat1.x - playerX) / 375  ← nearest platform delta X
+[4] (plat1.y - playerY) / 800  ← nearest platform delta Y
+[5] (plat2.x - playerX) / 375  ← 2nd nearest delta X
+[6] (plat2.y - playerY) / 800  ← 2nd nearest delta Y
+[7] isNearestTrampoline ? 1 : 0
+[8] stagnantBounces / 10
+```
 
-### Physics tracking (inside step hook)
+### NEAT Outputs
+```
+output[0] > 0.6 AND > output[1] → LEFT  (pointer.x = 100)
+output[1] > 0.6 AND > output[0] → RIGHT (pointer.x = 600)
+else                             → NONE  (isTouching = false)
+```
+
+### Fitness Function
 ```javascript
-const vy = py - d.prevY;           // frame-by-frame Y delta
-const goingUp   = vy < -0.5;      // ball rising (toward negative Y)
-const goingDown = vy >  0.5;      // ball falling (toward positive Y)
-
-// IMPORTANT: Only update wasGoingUp/Down when ball is actually moving
-// (not in neutral zone at apex/nadir), else apex detection breaks
-if (goingUp || goingDown) {
-  d.wasGoingUp   = goingUp;
-  d.wasGoingDown = goingDown;
-}
-
-// Bounce detection (ball just left a platform):
-if (goingUp && d.wasGoingDown) { d.platformY = d.prevY; }
-
-// Apex detection (ball just started falling):
-if (goingDown && d.wasGoingUp) {
-  const bh = Math.abs(d.platformY - newApexY);
-  d.bounceH = EMA(d.bounceH, bh);  // tracks max bounce height
-  ai.bounceH = Math.round(d.bounceH);
+calcFitness = ({ highestY, score, trampolineHits, isCheater, durationMs }) => {
+  if (isCheater) return 0;
+  return Math.max(0,
+    Math.max(0, -highestY) * 0.1  // height bonus
+    + score * 2                    // score bonus
+    + trampolineHits * 50          // trampoline bonus
+    - (durationMs > 120000 ? 50 : 0) // slow run penalty
+  );
 }
 ```
 
-### Platform candidate selection
+### Speciation
+- Compatibility threshold: 3.0 (c1=1.0, c2=1.0, c3=0.4)
+- Stale species removed after 15 gens without improvement
+- Elitism: top 2 genomes per species pass unchanged
+
+## Rule-Based Bot Architecture (v9.12)
+
+### Scoring Formula
 ```
-FALLING phase → look for platforms between apex and floor, within maxReach X
-RISING phase  → look for platforms just above current apex, within maxReach X
-Fallback 1    → relax Y range to ±bounceH
-Fallback 2    → ignore blacklist
-Fallback 3    → ignore reach constraints (last resort)
+pScore = -xEff * 0.6 + (-p.y) * 0.08 + tramBonus - (moving ? 150 : 0) + reachComfort - recencyPenalty(p)
+tramBonus = 1000 (or -1000 if CTB >= 3 — avoid trampoline lock)
+reachComfort = up to +80 for platforms well within BH range
 ```
 
-### Stagnation handling
-- **Score-based** (v6): `stagnantScoreBounces` — counts bounces where `scene.highestPointReached` didn't improve by >3 pts
-- **Apex-based**: `stagnantBounces` — counts bounces where apex didn't improve by >50 units
-- At `stagnantBounces >= WANDER_AFTER=4`: expanded candidate search with recency penalty
-- At `stagnantScoreBounces >= 10 && stagnantBounces >= 8`: QUIT mode (stop steering to end round)
+### Life-Preservation (v9.11 key fix)
+- Falling emergency scan: `p.y > py` strictly (never aim above falling ball)
+- Post-scoring override: if `goingDown && bestTarget.y < py` → scan nearest-below (`LIFE` label)
+- World-wrap in emergency: use `effectiveXDist()` not raw `Math.abs(dx)`
 
-### Blacklist
-- Key: `${round(x/20)*20}_${round(y/20)*20}` (20-unit buckets)
-- After 3 failed attempts targeting same platform → blacklisted for this round
-- Cleared when: ball climbs 150+ units higher, or stagnant >= 5 (force clear)
+### Stagnation
+- `stagnantBounces >= effectiveWanderAfter` (6 normally, 8 when score>80) → emergency mode
+- Emergency: `windowEmg` (bounce-window platforms) → `nearbyEmg` (reach-filtered below) → pure wander
+- Force-exit at Stag:13
 
-## Known Issues & Critical Bugs Fixed
-
-### FIXED in v9.3: Phase-aware fallback (was CRITICAL)
-**Symptom**: Falling ball steered toward platforms above it (behind direction of travel) → missed platforms → fell off screen.
-**Root cause**: Fallback candidate filter `p.y < py + 50` picked platforms above a falling ball (wrong direction).
-**Fix**: Phase-aware fallbacks — falling: `p.y > py - BH*0.3 && p.y < py + BH*1.5`; rising: original above-ball range.
-
-### OPEN: Ball dies at high altitude despite 4 candidates (High:112 ceiling)
-**Symptom**: Round 23 consistently dies at 40–42s with High:112, Ph:rising, Cands:4, Dir:center, no stagnation.
-**Hypothesis A**: v9's "highest-scoring" platform selection picks platforms at the edge of BH range (95% BH) — slim margin for error. Early code picked NEAREST (50% BH) — much safer.
-**Hypothesis B**: Moving platforms shift away from calculated position by landing time.
-**Fix in v9.4**: Add reach-comfort bonus to scoring; prefer platforms within 75% of BH.
-
-### OPEN: setVelocity(12.8, vy) effectiveness uncertain
-**Symptom**: `scene.player.body.velocity.x` always reads 0 (wrong access path).
-**Impact**: Unclear if velocity injection works or if only activePointer manipulation steers the ball.
-**Note**: Ball DOES move horizontally (confirmed by X readings), so activePointer IS working.
-
-### FIXED in v9.3: Dead seeds
-**Fix**: Early exit at 5s if High==0 — saves ~30% of round time.
-
-### FIXED in v5: 1-second rounds due to leaderboard overlay
-**Fix**: Click `[data-testid="START_BUTTON"]` element during wait loop.
-
-## Score & Rankings
-- **Bot record**: High:112 (v9.3, round 23 — deterministic seed)
-- **API best on bot account**: 220.1 (historical, unknown origin)
-- **Target**: 300 pts to enter prize draw
-- **Human high score**: 299 (personal) — campaign top scores around 700+
-- Score submitted via `POST /api/post-game-score` with AES-encrypted leaderBoardId (cannot forge)
-
-## UI / Browser Details
-
-### Critical: Leaderboard overlay after each round
-- After each round, a leaderboard appears with `[data-testid="START_BUTTON"]` at bottom (y≈597)
-- **Must click `START_BUTTON` element**, NOT the canvas area
-- 0s rounds in v4 were all caused by clicking wrong area
-- Fix (v5+): click `[data-testid="START_BUTTON"]` every 250ms in wait loop
-
-### Round start deadlock (fixed in v5)
-- `scene.roundOver` only becomes false AFTER a click starts the round
-- Must click DURING the wait loop, not after it exits
-
-### Form submission (one-time, on fresh account)
-- Email: `<EMAIL>` | Name: `<NAME>` | Username: `<USERNAME>` (set via `EMAIL`/`NAME`/`USERNAME` env vars)
-- React checkbox hack: `cb[reactPropsKey].onChange({ target: { checked: true } })`
-- React form submit: call `form[reactPropsKey].onSubmit(fakeEvent)`
+## Physics Constants
+| Bounce type | Height (world units) |
+|-------------|---------------------|
+| Normal | ~393–405 |
+| Trampoline (CTB:1) | ~510–620 |
+| Double trampoline (CTB:2) | ~680–779 |
 
 ## Testing
 ```bash
-node test-ai-logic.js        # 25 unit tests, all should pass
-node smart-player-v9.js      # runs current bot (non-headless)
-node analyze-run.js run.log  # extract per-round High scores from a log file
+node test-ai-logic.js        # 25 unit tests — must pass after every change
+node scripts/neat-analyse.js # view NEAT training progress
+npm run dashboard            # live dashboard at localhost:3000
 ```
 
-## Coding Conventions
-- All AI logic inside `page.addInitScript()` closure — no external imports
-- Constants in ALL_CAPS at top of initScript: `BH_INIT`, `X_VEL`, `WANDER_AFTER`, etc.
-- `ai` = `window.__AI__` (bridge between Phaser step hook and Node.js)
-- `d` = `ai._dyn` (per-round mutable state, reset via `freshDyn()` each round)
-- `scene` = the active GAME_SCENE Phaser scene object
-- Log prefix format: `[${elapsed}s] Y:${playerY} Ph:${phase} Dir:${dir} BH:${bounceH} High:${score}`
-- Never modify `scene.highestPointReached` directly (server-side validation)
-- Anti-bot: use mobile User-Agent, `hasTouch: true`, realistic click positions with randomness
+## Anti-Bot Compliance
+- Mobile User-Agent + hasTouch: true
+- NO `scene.player.setVelocity()` — input simulation only
+- NO physics constant manipulation
+- isCheater monitored: if true, round aborted immediately, fitness=0
+- Score submitted via Flarie API (AES-encrypted leaderBoardId — cannot forge)
+
+## Key Learnings
+1. **Life preservation beats scoring**: Keeping ball alive to reach trampolines > perfect platform targeting
+2. **Double trampoline (CTB:2)**: Single biggest score jump; catapults through sparse high-altitude zones
+3. **World-wrap is real**: Ball teleports left→right; use effectiveXDist() everywhere
+4. **isCheater never triggered**: setVelocity alongside pointer simulation seems tolerated, but removing it is safer for NEAT
+5. **NEAT gen 1**: Expect near-zero scores. Watch for improvement from gen 3–5 onwards
+
+## Game Architecture
+
+### Engine
