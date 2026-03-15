@@ -10,6 +10,8 @@
     "enumerate": "node scripts/enumerate-textures.js",
     "analyse": "node scripts/analyse.js",
     "neat": "node scripts/neat-play.js",
+    "neat-headful": "node scripts/neat-play.js --headful",
+    "neat-resume": "node scripts/neat-play.js --resume",
     "neat-analyse": "node scripts/neat-analyse.js",
     "dashboard": "node scripts/dashboard-server.js"
   },
