@@ -4,7 +4,11 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "play": "node smart-player-v96.js",
+    "play-v97": "node smart-player-v97.js",
+    "test": "node test-ai-logic.js",
+    "enumerate": "node scripts/enumerate-textures.js",
+    "analyse": "node scripts/analyse.js"
   },
   "keywords": [],
   "author": "",
