@@ -11,7 +11,7 @@
 const fs = require('fs');
 
 const args = process.argv.slice(2);
-const logFile = args.find(a => !a.startsWith('--'));
+const logFile = args.find(a => !a.startsWith('-'));
 const showSummary = args.includes('--summary') || args.includes('-s');
 
 if (!logFile) {
