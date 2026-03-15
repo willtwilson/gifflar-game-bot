@@ -38,13 +38,13 @@ class InnovationTracker {
   }
 
   toJSON() {
-    return { map: [...this._map.entries()], next: this._next };
+    return { _map: [...this._map.entries()], _next: this._next };
   }
 
   static fromJSON(data) {
     const tracker = new InnovationTracker();
-    tracker._map = new Map(data.map);
-    tracker._next = data.next;
+    tracker._map = new Map(data._map);
+    tracker._next = data._next;
     return tracker;
   }
 }
