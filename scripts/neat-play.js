@@ -190,7 +190,7 @@ async function runGenome(context, genome) {
 
   // ── Play until round ends ──────────────────────────────────────────────
   const roundStart  = Date.now();
-  const MAX_ROUND_MS = 90000;
+  const MAX_ROUND_MS = 45000;  // 45s cap — best runs are <35s; 90s was wasteful
   const MIN_ROUND_MS = 5000;
   const SCORE_STAGNATION_MS = 12000; // exit if score doesn't improve for 12 s
 
@@ -209,8 +209,9 @@ async function runGenome(context, genome) {
       };
     });
 
-    // Score progress tracking — reset timer whenever score improves
-    if (snap.score !== lastScore) {
+    // Score progress tracking — only reset timer when score improves by a meaningful amount.
+    // Using !== would reset on every tiny floating-point tick from highestPointReached.
+    if (snap.score >= lastScore + 0.5) {
       lastScore = snap.score;
       lastScoreChangeMs = Date.now();
     }
@@ -242,6 +243,7 @@ async function runGenome(context, genome) {
 
     // Force-exit when score has not improved for SCORE_STAGNATION_MS (ball stuck bouncing in place)
     if ((Date.now() - lastScoreChangeMs) > SCORE_STAGNATION_MS && (Date.now() - roundStart) > MIN_ROUND_MS) {
+      process.stdout.write(` [stagnant@${((Date.now()-roundStart)/1000).toFixed(0)}s]`);
       await page.evaluate(() => {
         const g = window.__PHASER_GAME__;
         const s = g?.scene?.scenes?.find(sc => sc.sys?.settings?.key === 'GAME_SCENE');
