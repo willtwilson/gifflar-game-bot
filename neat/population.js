@@ -182,7 +182,6 @@ class Population {
         staleCount:     sp.staleCount,
         memberIds:      sp.members.map(g => g.id),
       })),
-      innovationTracker: this.innovationTracker.toJSON(),
     };
   }
 
