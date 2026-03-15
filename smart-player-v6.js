@@ -17,7 +17,6 @@
  */
 
 const { chromium } = require('playwright');
-const path = require('path');
 const fs = require('fs');
 
 const EMAIL        = 'willtwilson+giff@gmail.com';
