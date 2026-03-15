@@ -75,6 +75,8 @@ async function runGenome(genome) {
     }
   });
 
+  try {
+
   // Inject the NEAT brain IIFE
   await page.addInitScript(neatBrainSrc);
 
@@ -212,8 +214,6 @@ async function runGenome(genome) {
     await page.waitForTimeout(2000);
   }
 
-  await browser.close();
-
   return {
     genomeId:       genome.id,
     highestY:       ai.highestY        || 0,
@@ -223,6 +223,9 @@ async function runGenome(genome) {
     durationMs:     durationMs,
     lastAction:     ai.lastAction      || 'NONE',
   };
+  } finally {
+    await browser.close();
+  }
 }
 
 // ── Main training loop ─────────────────────────────────────────────────────
@@ -260,7 +263,9 @@ async function main() {
 
   let allTimeBestFitness = population.bestFitness || -Infinity;
 
-  for (let gen = population.getGeneration(); gen < population.getGeneration() + config.maxGenerations; gen++) {
+  const startGen = population.getGeneration();
+  const endGen   = startGen + config.maxGenerations;
+  for (let gen = startGen; gen < endGen; gen++) {
     const genStart = Date.now();
     console.log(`\n══ Generation ${gen + 1} ══ (${population.genomes.length} genomes, ${population.species.length} species)`);
 

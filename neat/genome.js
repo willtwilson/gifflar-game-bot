@@ -1,9 +1,27 @@
 'use strict';
 
-let _genomeIdCounter = 0;
+const { randomUUID } = require('crypto');
 
 function randWeight() {
   return (Math.random() * 4) - 2; // [-2, 2]
+}
+
+/** BFS reachability check — returns true if `to` is reachable from `from`. */
+function hasPath(from, to, connections) {
+  const visited = new Set();
+  const queue = [from];
+  while (queue.length > 0) {
+    const cur = queue.shift();
+    if (cur === to) return true;
+    if (visited.has(cur)) continue;
+    visited.add(cur);
+    for (const c of connections) {
+      if (c.enabled && c.in === cur && !visited.has(c.out)) {
+        queue.push(c.out);
+      }
+    }
+  }
+  return false;
 }
 
 class Genome {
@@ -93,7 +111,7 @@ class Genome {
         for (const b of nodeIds) {
           if (inputIds.has(b)) continue; // inputs can't be target
           if (a === b) continue;
-          if (!existing.has(`${a}-${b}`)) {
+          if (!existing.has(`${a}-${b}`) && !hasPath(b, a, this.connections)) {
             candidates.push([a, b]);
           }
         }
@@ -117,7 +135,7 @@ class Genome {
    * Matching genes are averaged; disjoint/excess come from `this`.
    */
   crossover(other) {
-    const child = new Genome(`g${_genomeIdCounter++}`, this.config);
+    const child = new Genome(randomUUID(), this.config);
 
     // Build innovation map for the other parent
     const otherMap = new Map(other.connections.map(c => [c.innovation, c]));

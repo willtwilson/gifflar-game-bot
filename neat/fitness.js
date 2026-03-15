@@ -17,7 +17,7 @@ function calcFitness({ highestY, score, trampolineHits, isCheater, durationMs })
   const scoreBonus  = score * 2;
   const trampBonus  = trampolineHits * 50;
   const timePenalty = durationMs > 120000 ? -50 : 0;
-  return heightScore + scoreBonus + trampBonus + timePenalty;
+  return Math.max(0, heightScore + scoreBonus + trampBonus + timePenalty);
 }
 
 module.exports = { calcFitness };
