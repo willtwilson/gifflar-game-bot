@@ -535,7 +535,7 @@ Current target: <strong style="color:#f59e0b">2000+ fitness (~score 342+)</stron
     const bestSoFar = fitnessValues.length ? Math.max(...fitnessValues).toFixed(1) : '—';
     const avgSoFar = fitnessValues.length ? (fitnessValues.reduce((a,b)=>a+b,0)/fitnessValues.length).toFixed(1) : '—';
     el.style.display = 'block';
-    el.innerHTML = \`<span style="color:#10b981;font-weight:600">🔴 LIVE</span> Gen \${mg.gen+1} · Genome \${completed+1}/20 running · Best so far: <strong>\${bestSoFar}</strong> · Avg: \${avgSoFar}\`;
+    el.innerHTML = \`<span style="color:#10b981;font-weight:600">🔴 LIVE</span> Gen \${mg.gen+1} · Genome \${completed+1}/${live.populationSize || '?'} running · Best so far: <strong>\${bestSoFar}</strong> · Avg: \${avgSoFar}\`;
   }
 
   // ── Genome Grid ───────────────────────────────────────────────────
@@ -723,6 +723,7 @@ const server = http.createServer((req, res) => {
         midGen: cp._midGen || null,
         generation: cp.generation,
         bestFitness: cp.bestFitness,
+        populationSize: Array.isArray(cp.genomes) ? cp.genomes.length : null,
       }));
     } catch {
       res.writeHead(200, { 'Content-Type': 'application/json' });

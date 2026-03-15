@@ -55,7 +55,9 @@ function appendResult(entry) {
  * @param {{ gen: number, genomeIndex: number, fitnessMap: Map<string,number> } | null} midGen
  */
 function saveCheckpoint(pop, midGen = null) {
+  // Fix: remove innovationTracker from pop.toJSON() output (stored separately as _innovationTracker)
   const data = pop.toJSON();
+  delete data.innovationTracker;
   data._innovationTracker = innovationTracker.toJSON();
   if (midGen) {
     data._midGen = {
@@ -150,9 +152,10 @@ async function runGenome(context, genome) {
     }
   });
 
-  // Inject brain + genome weights before page load
-  await page.addInitScript(neatBrainSrc);
-  await page.addInitScript(`window.__NEAT_GENOME__ = ${JSON.stringify(genome.toJSON())};`);
+  try {
+    // Inject brain + genome weights before page load
+    await page.addInitScript(neatBrainSrc);
+    await page.addInitScript(`window.__NEAT_GENOME__ = ${JSON.stringify(genome.toJSON())};`);
 
   await page.goto(GAME_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
   await page.waitForTimeout(4000);
@@ -230,25 +233,26 @@ async function runGenome(context, genome) {
   }
 
   // ── Collect results ────────────────────────────────────────────────────
-  const ai = await page.evaluate(() => window.__NEAT_AI__ || {});
-  const durationMs = Date.now() - roundStart;
+    const ai = await page.evaluate(() => window.__NEAT_AI__ || {});
+    const durationMs = Date.now() - roundStart;
 
-  // Wait briefly for API response
-  if (!apiResponded) {
-    await page.waitForTimeout(2000);
+    // Wait briefly for API response
+    if (!apiResponded) {
+      await page.waitForTimeout(2000);
+    }
+
+    return {
+      genomeId:       genome.id,
+      highestY:       ai.highestY        || 0,
+      score:          ai.score           || 0,   // use brain score, not API highScore (API returns account all-time best)
+      trampolineHits: ai.trampolineHits  || 0,
+      isCheater:      isCheater,
+      durationMs:     durationMs,
+      lastAction:     ai.lastAction      || 'NONE',
+    };
+  } finally {
+    await page.close().catch(() => {});
   }
-
-  await page.close();
-
-  return {
-    genomeId:       genome.id,
-    highestY:       ai.highestY        || 0,
-    score:          ai.score           || 0,   // use brain score, not API highScore (API returns account all-time best)
-    trampolineHits: ai.trampolineHits  || 0,
-    isCheater:      isCheater,
-    durationMs:     durationMs,
-    lastAction:     ai.lastAction      || 'NONE',
-  };
 }
 
 // ── Main training loop ─────────────────────────────────────────────────────
@@ -269,7 +273,10 @@ async function main() {
       const it = require('../neat/innovation.js');
       const { map, next } = data._innovationTracker;
       it._map  = new Map(map);
-      it._next = typeof next === 'number' ? next : 0;
+      // Derive _next from the max stored value to avoid reusing existing numbers
+      // if next is missing/corrupted (e.g., from a previously broken checkpoint)
+      const mapValues = [...new Map(map).values()].filter(v => typeof v === 'number');
+      it._next = typeof next === 'number' ? next : (mapValues.length ? Math.max(...mapValues) + 1 : 0);
     }
 
     population = Population.fromJSON(data, config, innovationTracker);
@@ -292,7 +299,7 @@ async function main() {
     console.log(`  Initialised fresh population (${population.genomes.length} genomes, ${population.species.length} species)`);
   }
 
-  let allTimeBestFitness = population.bestFitness || -Infinity;
+  let allTimeBestFitness = population.bestFitness ?? -Infinity;
 
   // ── Browser / context management (supports crash recovery) ───────────────
   // Recreate the browser every BROWSER_RESTART_EVERY genomes to avoid memory
@@ -338,7 +345,6 @@ async function main() {
       const isBrowserDead =
         msg.includes('closed') || msg.includes('crashed') ||
         msg.includes('disconnected') || msg.includes('Target closed') ||
-        msg.includes('browser') || msg.includes('Timeout') ||
         msg.includes('net::ERR');
 
       console.error(`\n  ❌ Error running genome ${genome.id}: ${msg.slice(0, 120)}`);
@@ -360,7 +366,8 @@ async function main() {
   }
 
   try {
-    for (let gen = population.getGeneration(); gen < population.getGeneration() + config.maxGenerations; gen++) {
+    const startGen = population.getGeneration();
+    for (let gen = startGen; gen < startGen + config.maxGenerations; gen++) {
       const genStart = Date.now();
 
       // ── Mid-gen crash recovery ─────────────────────────────────────────────
