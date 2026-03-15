@@ -103,35 +103,45 @@ assert(!safe.find(p => p.tex === 'broken'),  'broken excluded');
 assert(!safe.find(p => p.tex === 'brown'),   'brown excluded');
 
 console.log('\n─── Sideways reach filter ───');
-const bounceFrames = 120;
-const maxReach     = X_VEL * bounceFrames; // 12.8 * 120 = 1536
+const bounceFrames = 20;                     // small value so maxReach < world radius
+const maxReach     = X_VEL * bounceFrames;   // 12.8 * 20 = 256
 const px           = 375;
-const reachable = plats.filter(p =>
+// Two close platforms (eff < 256) and one at world-wrap midpoint (eff = 375 > 256)
+const reachPlats = [
+  { x: 350, y: -500, tex: 'regular'    }, // effectiveXDist = 25 → reachable
+  { x: 400, y: -600, tex: 'trampoline' }, // effectiveXDist = 25 → reachable
+  { x:   0, y: -700, tex: 'regular'    }, // effectiveXDist = min(375,375) = 375 → NOT reachable
+];
+const reachable = reachPlats.filter(p =>
   !BROKEN_KEYS.has(p.tex) && effectiveXDist(p.x, px) <= maxReach
 );
-assert(reachable.length === 2, 'both safe platforms within 1536 reach');
+assert(reachable.length === 2, 'both close platforms within 256 reach');
 
-// Platform far to the right (no wrap), reach < 1536
-const tooFarPlat = { x: 370, y: -900, tex: 'regular' }; // very close X
-assert(effectiveXDist(tooFarPlat.x, px) <= maxReach, 'close platform reachable');
+// Platform exactly at world-wrap midpoint: effectiveXDist = 375 > 256 → unreachable
+const tooFarPlat = { x: 0, y: -900, tex: 'regular' }; // effectiveXDist(0, 375) = min(375, 375) = 375
+assert(effectiveXDist(tooFarPlat.x, px) > maxReach, 'opposite-edge platform out of reach');
+const reachable2 = [tooFarPlat].filter(p => effectiveXDist(p.x, px) <= maxReach);
+assert(reachable2.length === 0, 'out-of-reach platform excluded from candidates');
 
 console.log('\n─── Blacklist tracking ───');
 const blacklisted = {};
 const target = { x: 305, y: -710, tex: 'regular' };
 const tKey   = blacklistKey(target);
 
-// Simulate 3 failures
+// Simulate 3 failures using a single accumulated failCounts map (mirrors real accumulation logic)
+const failCounts = {};
 for (let i = 0; i < 3; i++) {
-  const failCounts = { [tKey]: i + 1 };
+  failCounts[tKey] = (failCounts[tKey] || 0) + 1;
+  if (i < 2) assert(!blacklisted[tKey], `not blacklisted after ${i + 1} failure(s)`);
   if (failCounts[tKey] >= 3) blacklisted[tKey] = true;
 }
 assert(blacklisted[tKey], 'platform blacklisted after 3 failures');
 assert(isBlacklisted(target, blacklisted), 'isBlacklisted returns true');
 
-// A nearby but different platform (different bucket key) is NOT blacklisted
-const nearbyPlat = { x: 315, y: -720, tex: 'regular' }; // rounds to same bucket (300, 700)
-const nearby2    = { x: 340, y: -740, tex: 'regular' }; // rounds to (340, 740) bucket
-assert(!isBlacklisted(nearby2, blacklisted), 'different position not blacklisted');
+// A nearby platform with a different bucket key is NOT blacklisted
+// x=340 → Math.round(340/20)*20 = 340; y=-740 → Math.round(-740/20)*20 = -740 → different from target key
+const nearby2 = { x: 340, y: -740, tex: 'regular' };
+assert(!isBlacklisted(nearby2, blacklisted), 'different-bucket position not blacklisted');
 
 // Clearing blacklist
 const clearedBL = {};
