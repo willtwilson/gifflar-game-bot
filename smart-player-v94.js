@@ -1,17 +1,14 @@
 /**
- * Gifflar Winter Vibe - Smart Game Player v9
+ * Gifflar Winter Vibe - Smart Game Player v9.4
  *
- * Improvements over v8:
- *  - Fix apex detection: only update wasGoingUp/wasGoingDown when ball is
- *    actually moving (not in neutral zone). Fixes BH:0 in round 1.
- *  - Minimum round duration (5s) before checking roundOver. Fixes ~40% of
- *    rounds dying in 1s due to leaderboard animation transient.
- *  - Remove QUIT mode; replace with stagnant>50 force-exit
- *  - Vertical oscillation detection: force escape mode if ball bounces on
- *    same 2 X positions 4+ times.
- *  - Emergency preservation: search ALL allPlats (no Y limit); platform pool recycling
- *  - Height-prioritised scoring: -xEff*0.3 + (-p.y)*0.3
- *  - Click rate 30ms → 80ms (matches v4 which achieved 220.1)
+ * Improvements over v9.3:
+ *  - Fix rising-phase apex bug: use predicted apex (platformY - bounceH)
+ *    instead of stale d.apexY for fall-zone candidate selection.
+ *  - Reach-comfort scoring bonus: mild bonus for platforms well within BH range.
+ *  - Low-density survival mode: nearest-platform fallback at high altitude
+ *    when fewer than 8 platforms are visible.
+ *  - Wider emergency fallback range (0.5/2.5× BH) for sparse high-altitude zones.
+ *  - Increased moving platform penalty 30 → 80.
  */
 
 const { chromium } = require('playwright');
@@ -432,8 +429,8 @@ async function runGame() {
               // In Phaser world coords, Y increases downward, so "below ball" = p.y > py.
               if (candidates.length === 0) {
                 candidates = allPlats.filter(p =>
-                  p.y > py - d.bounceH * 0.3 &&  // at most 30% BH above current position
-                  p.y < py + d.bounceH * 1.5      // up to 1.5x BH below (emergency landing zone)
+                  p.y > py - d.bounceH * 0.5 &&
+                  p.y < py + d.bounceH * 2.5  // wider range for sparse zones at high altitude
                 );
               }
               // Emergency: any platform near ball, prefer below (handles platform pool recycling)
@@ -449,11 +446,13 @@ async function runGame() {
               }
             } else {
               // RISING: pre-position for the CURRENT fall by targeting platforms in the
-              // fall zone (between apex and previous platform). Avoids steering toward
-              // unreachable platforms above the apex.
-              if (d.apexY !== null && d.platformY !== null) {
+              // fall zone (between predicted next apex and previous platform). Use
+              // predictedApexY = platformY - bounceH rather than the stale d.apexY so the
+              // filter window reflects the apex this bounce will actually reach.
+              const predictedApexY = (d.platformY !== null) ? (d.platformY - d.bounceH) : d.apexY;
+              if (predictedApexY !== null && d.platformY !== null) {
                 candidates = allPlats.filter(p =>
-                  p.y > d.apexY + 10 &&
+                  p.y > predictedApexY + 10 &&
                   p.y < d.platformY - 20 &&
                   effectiveXDist(p.x) <= maxReach && !isBlacklisted(p)
                 );
@@ -773,4 +772,5 @@ async function runGame() {
 }
 
 runGame().catch(err => { console.error(err); process.exit(1); });
+
 
