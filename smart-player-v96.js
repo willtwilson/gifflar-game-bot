@@ -32,14 +32,25 @@ async function runGame() {
   const page = await context.newPage();
 
   let bestScore = 0;
+  let cheatFlagCount = 0;
 
   page.on('response', async (res) => {
     const url = res.url();
     if (url.includes('/api/post-game-score')) {
       try {
         const body = await res.json();
-        if (body.highScore > bestScore) bestScore = body.highScore;
-        console.log(`  🏆 Score: ${body.highScore.toFixed(1)} | Rank: ${body.ranking}`);
+        if (body.isCheater) {
+          cheatFlagCount++;
+          console.log(`  ⚠️  CHEATER FLAG! isCheater=true (count: ${cheatFlagCount})`);
+          if (cheatFlagCount >= 2) {
+            console.log('  🚨 Two cheat flags in session — closing browser to protect account');
+            await browser.close();
+            process.exit(1);
+          }
+        } else {
+          if (body.highScore > bestScore) bestScore = body.highScore;
+          console.log(`  🏆 Score: ${body.highScore.toFixed(1)} | Rank: ${body.ranking}`);
+        }
       } catch {}
     }
     if (url.includes('/api/post-game-start')) {
@@ -736,6 +747,26 @@ async function runGame() {
     const elapsed = Math.round((Date.now() - roundStart) / 1000);
     const deathCause = lastSnap?.stagnant > 20 ? 'stagnant' : lastSnap?.roundOver ? 'fell' : 'timeout';
     console.log(`  Round ${roundNum} ended after ${elapsed}s | ${clicks} clicks | cause:${deathCause} stag:${lastSnap?.stagnant ?? 0}`);
+
+    // JSONL logging
+    try {
+      const { appendRound } = require('./lib/logger');
+      const roundScore = await page.evaluate(() => {
+        const game = window.__PHASER_GAME__;
+        const scene = game?.scene?.scenes?.find(s=>s.sys?.settings?.key==='GAME_SCENE');
+        return Math.round(scene?.highestPointReached || 0);
+      });
+      appendRound({
+        session: process.env.BOT_SESSION || 'v96',
+        round: roundNum,
+        score: roundScore,
+        durationMs: elapsed * 1000,
+        cause: lastSnap?.stagnant > 20 ? 'stagnant' : lastSnap?.roundOver ? 'fell' : 'timeout',
+        stagnantBounces: lastSnap?.stagnant || 0,
+        trampolineHits: lastSnap?.ctb || 0,
+        isCheater: false
+      });
+    } catch (logErr) { /* non-fatal */ }
   }
 
   for (let round = 1; round <= MAX_ROUNDS; round++) {
