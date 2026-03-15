@@ -44,6 +44,7 @@ function parseResults() {
   for (const [genNum, recs] of [...genMap.entries()].sort((a, b) => a[0] - b[0])) {
     const fitnesses = recs.map(r => r.fitness ?? 0);
     const scores = recs.map(r => r.score ?? 0);
+    const heights = recs.map(r => r.highestY ?? 0);
     const genomes = recs.map(r => ({
       genomeId: r.genomeId ?? r.id ?? 'unknown',
       fitness: r.fitness ?? 0,
@@ -64,6 +65,7 @@ function parseResults() {
       avgScore: scores.reduce((a, b) => a + b, 0) / scores.length,
       speciesCount: speciesSet.size,
       isCheaterCount: recs.filter(r => r.isCheater).length,
+      bestHeight: Math.min(...heights),
       genomes,
     });
   }
@@ -155,7 +157,7 @@ const HTML = `<!DOCTYPE html>
   .card{background:#111827;border:1px solid #1f2937;border-radius:12px;padding:20px;margin-bottom:24px}
   .card-title{font-size:1rem;font-weight:600;margin-bottom:4px}
   .card-sub{font-size:.8rem;color:#6b7280;margin-bottom:16px}
-  .two-col{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px}
+  .two-col{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:24px}
   @media(max-width:700px){.two-col{grid-template-columns:1fr}}
   .two-col .card{margin-bottom:0}
   /* ── Genome Grid ── */
@@ -198,6 +200,7 @@ const HTML = `<!DOCTYPE html>
   <span id="gen-counter">Loading…</span>
   <span id="best-badge">🏆 Best: — | Record: 342.1</span>
   <span id="spinner">⟳ Live</span>
+  <div id="live-indicator" style="display:none;background:#1a2e1a;border:1px solid #10b981;border-radius:6px;padding:4px 12px;font-size:.82rem;margin-left:8px"></div>
   <span id="updated"></span>
 </div>
 
@@ -214,11 +217,11 @@ const HTML = `<!DOCTYPE html>
   <!-- Fitness Chart -->
   <div class="card">
     <div class="card-title">📈 Fitness over Generations</div>
-    <div class="card-sub">Watch for the upward trend! Blue = best fitness, Purple = average fitness, Red dashed = target (300)</div>
+    <div class="card-sub">Watch for the upward trend! Blue = best fitness, Purple = average fitness, Red dashed = target (2000)</div>
     <canvas id="fitChart" height="100"></canvas>
   </div>
 
-  <!-- Score + Species Charts -->
+  <!-- Score + Species + Height Charts -->
   <div class="two-col">
     <div class="card">
       <div class="card-title">🎯 Best Score per Generation</div>
@@ -229,6 +232,11 @@ const HTML = `<!DOCTYPE html>
       <div class="card-title">🦋 Species Count over Time</div>
       <div class="card-sub">More species = more diverse strategies exploring the space</div>
       <canvas id="speciesChart" height="160"></canvas>
+    </div>
+    <div class="card">
+      <div class="card-title">📏 Height Progress per Generation</div>
+      <div class="card-sub">Cyan = max height climbed (world units). Higher = better.</div>
+      <canvas id="heightChart" height="160"></canvas>
     </div>
   </div>
 
@@ -269,13 +277,13 @@ Species count: <strong id="exp-species" style="color:#f59e0b">—</strong> — M
     <div class="exp-card">
       <h3>📊 How Fitness Works</h3>
       <p>Each genome is scored by how well it plays the game:</p>
-      <pre style="margin:10px 0;background:#0a0e1a;padding:10px;border-radius:6px;font-size:.75rem;color:#a5f3fc">Fitness = (height × 0.1) + (score × 2)
+      <pre style="margin:10px 0;background:#0a0e1a;padding:10px;border-radius:6px;font-size:.75rem;color:#a5f3fc">Fitness = (height × 0.1) + (score × 5)
         + (trampolines × 50)
         − (if > 120s: 50 penalty)
         − (if isCheater: 0 — disqualified)</pre>
       <p>Higher altitude = higher fitness. Trampolines give massive bonuses (+50 each). isCheater = instant zero.
 
-Current target: <strong style="color:#f59e0b">300+ fitness</strong> to beat the rule-based record.</p>
+Current target: <strong style="color:#f59e0b">2000+ fitness (~score 342+)</strong> to beat the rule-based record.</p>
     </div>
   </div>
 
@@ -300,17 +308,18 @@ Current target: <strong style="color:#f59e0b">300+ fitness</strong> to beat the 
 (function(){
   'use strict';
 
-  const POLL_MS = 10000;
+  const POLL_MS = 5000;
   const RULE_RECORD = 342.1;
-  const FITNESS_TARGET = 300;
+  const FITNESS_TARGET = 2000;
   const SPECIES_COLORS = ['#3b82f6','#10b981','#8b5cf6','#f59e0b','#ef4444','#ec4899','#06b6d4','#84cc16'];
 
-  let fitChart = null, scoreChart = null, speciesChart = null;
+  let fitChart = null, scoreChart = null, speciesChart = null, heightChart = null;
   let prevBestScore = -Infinity;
   let lastData = null;
 
   // ── Utils ──────────────────────────────────────────────────────────
-  function fmt(v, d=1){ return v==null?'—':Number(v).toFixed(d); }
+  function fmt(v, d=0){ return v==null?'—':Number(v).toFixed(d); }
+  function fmtFit(v){ return fmt(v, 1); }
   function fmtMs(ms){ if(!ms) return '—'; if(ms<1000) return ms+'ms'; return (ms/1000).toFixed(1)+'s'; }
   function speciesColor(s){ return SPECIES_COLORS[(s-1) % SPECIES_COLORS.length]; }
 
@@ -318,11 +327,12 @@ Current target: <strong style="color:#f59e0b">300+ fitness</strong> to beat the 
   async function fetchData(){
     document.getElementById('spinner').classList.add('visible');
     try {
-      const [dataRes, cpRes] = await Promise.all([
+      const [dataRes, cpRes, liveRes] = await Promise.all([
         fetch('/api/data').then(r=>r.json()),
-        fetch('/api/checkpoint').then(r=>r.json()).catch(()=>({exists:false}))
+        fetch('/api/checkpoint').then(r=>r.json()).catch(()=>({exists:false})),
+        fetch('/api/live').then(r=>r.json()).catch(()=>({hasMidGen:false}))
       ]);
-      update(dataRes, cpRes);
+      update(dataRes, cpRes, liveRes);
     } catch(e){
       console.warn('Fetch error:', e);
     } finally {
@@ -330,7 +340,7 @@ Current target: <strong style="color:#f59e0b">300+ fitness</strong> to beat the 
     }
   }
 
-  function update(data, cp){
+  function update(data, cp, live){
     lastData = data;
     const isActive = data.currentGenProgress && data.currentGenProgress.completed > 0;
     const dot = document.getElementById('status-dot');
@@ -353,7 +363,7 @@ Current target: <strong style="color:#f59e0b">300+ fitness</strong> to beat the 
     document.getElementById('updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
 
     // Stat cards
-    document.getElementById('s-bestfit').textContent = fmt(atb?.fitness);
+    document.getElementById('s-bestfit').textContent = fmtFit(atb?.fitness);
     document.getElementById('s-bestscore').textContent = fmt(atb?.score);
     const curGen = data.generations && data.generations[data.generations.length-1];
     document.getElementById('s-species').textContent = curGen ? curGen.speciesCount : '—';
@@ -364,6 +374,7 @@ Current target: <strong style="color:#f59e0b">300+ fitness</strong> to beat the 
     updateFitChart(data.generations);
     updateScoreChart(data.generations);
     updateSpeciesChart(data.generations);
+    updateHeightChart(data.generations);
 
     // Genome grid
     updateGenomeGrid(curGen);
@@ -373,6 +384,9 @@ Current target: <strong style="color:#f59e0b">300+ fitness</strong> to beat the 
 
     // Log
     updateLog(data.generations);
+
+    // Live indicator
+    updateLive(live);
   }
 
   // ── Fitness Chart ─────────────────────────────────────────────────
@@ -391,7 +405,7 @@ Current target: <strong style="color:#f59e0b">300+ fitness</strong> to beat the 
           datasets:[
             {label:'Best Fitness',data:best,borderColor:'#3b82f6',backgroundColor:'rgba(59,130,246,.1)',tension:.3,pointRadius:3,fill:true},
             {label:'Avg Fitness',data:avg,borderColor:'#8b5cf6',backgroundColor:'rgba(139,92,246,.05)',tension:.3,pointRadius:2,fill:true,borderDash:[4,3]},
-            {label:'Target (300)',data:targetLine,borderColor:'#ef4444',borderDash:[8,4],pointRadius:0,borderWidth:1.5,fill:false}
+            {label:'Target (2000)',data:targetLine,borderColor:'#ef4444',borderDash:[8,4],pointRadius:0,borderWidth:1.5,fill:false}
           ]
         },
         options:{
@@ -471,6 +485,59 @@ Current target: <strong style="color:#f59e0b">300+ fitness</strong> to beat the 
     }
   }
 
+  // ── Height Chart ──────────────────────────────────────────────────
+  function updateHeightChart(gens){
+    const labels = gens.map(g=>g.gen);
+    const heights = gens.map(g=>g.bestHeight ? Math.max(0, -g.bestHeight) : 0);
+    if(!heightChart){
+      const ctx = document.getElementById('heightChart').getContext('2d');
+      heightChart = new Chart(ctx,{
+        type:'line',
+        data:{
+          labels,
+          datasets:[{
+            label:'Max Height (units)',
+            data:heights,
+            borderColor:'#06b6d4',
+            backgroundColor:'rgba(6,182,212,.1)',
+            tension:.3,
+            pointRadius:3,
+            fill:true
+          }]
+        },
+        options:{
+          responsive:true,
+          plugins:{legend:{labels:{color:'#9ca3af',font:{size:10}}},tooltip:{backgroundColor:'#1f2937',titleColor:'#e5e7eb',bodyColor:'#9ca3af'}},
+          scales:{
+            x:{grid:{color:'#1f2937'},ticks:{color:'#6b7280'}},
+            y:{grid:{color:'#1f2937'},ticks:{color:'#6b7280'},title:{display:true,text:'Height (world units)',color:'#6b7280'}}
+          }
+        }
+      });
+    } else {
+      heightChart.data.labels = labels;
+      heightChart.data.datasets[0].data = heights;
+      heightChart.update();
+    }
+  }
+
+  // ── Live Indicator ────────────────────────────────────────────────
+  function updateLive(live){
+    const el = document.getElementById('live-indicator');
+    if(!el) return;
+    if(!live || !live.hasMidGen){
+      el.style.display = 'none';
+      return;
+    }
+    const mg = live.midGen;
+    const completed = mg.genomeIndex + 1;
+    const fitnessValues = Object.values(mg.fitnessMap || {});
+    const bestSoFar = fitnessValues.length ? Math.max(...fitnessValues).toFixed(1) : '—';
+    const avgSoFar = fitnessValues.length ? (fitnessValues.reduce((a,b)=>a+b,0)/fitnessValues.length).toFixed(1) : '—';
+    el.style.display = 'block';
+    el.innerHTML = \`<span style="color:#10b981;font-weight:600">🔴 LIVE</span> Gen \${mg.gen+1} · Genome \${completed+1}/20 running · Best so far: <strong>\${bestSoFar}</strong> · Avg: \${avgSoFar}\`;
+  }
+
   // ── Genome Grid ───────────────────────────────────────────────────
   function updateGenomeGrid(gen){
     const el = document.getElementById('genome-grid');
@@ -484,7 +551,7 @@ Current target: <strong style="color:#f59e0b">300+ fitness</strong> to beat the 
       const sc = speciesColor(g.species);
       return \`<div class="genome-card\${g.isCheater?' cheater':''}">
         <div class="gid" title="\${g.genomeId}">\${g.genomeId.substring(0,16)}…</div>
-        <div style="font-size:1rem;font-weight:700;color:\${g.isCheater?'#ef4444':'#e5e7eb'}">\${fmt(g.fitness)} fit</div>
+        <div style="font-size:1rem;font-weight:700;color:\${g.isCheater?'#ef4444':'#e5e7eb'}">\${fmtFit(g.fitness)} fit</div>
         <div class="fitness-bar-wrap"><div class="fitness-bar" style="width:\${pct}%"></div></div>
         <div class="genome-meta">
           <span style="color:#9ca3af">score: \${fmt(g.score)}</span>
@@ -592,7 +659,7 @@ Current target: <strong style="color:#f59e0b">300+ fitness</strong> to beat the 
       return \`<tr class="\${cls}">
         <td>\${gen}</td>
         <td style="font-family:monospace" title="\${g.genomeId}">\${g.genomeId.substring(0,14)}…</td>
-        <td>\${fmt(g.fitness)}</td>
+        <td>\${fmtFit(g.fitness)}</td>
         <td>\${fmt(g.score)}</td>
         <td><span class="species-badge" style="background:\${sc}22;color:\${sc}">S\${g.species}</span></td>
         <td>\${g.trampolineHits||0}</td>
@@ -643,6 +710,24 @@ const server = http.createServer((req, res) => {
     const cp = getCheckpoint();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(cp));
+    return;
+  }
+
+  if (url === '/api/live') {
+    try {
+      const raw = fs.readFileSync(CHECKPOINT_FILE, 'utf8');
+      const cp = JSON.parse(raw);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        hasMidGen: !!cp._midGen,
+        midGen: cp._midGen || null,
+        generation: cp.generation,
+        bestFitness: cp.bestFitness,
+      }));
+    } catch {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ hasMidGen: false, midGen: null }));
+    }
     return;
   }
 
