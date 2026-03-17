@@ -2,7 +2,7 @@ module.exports = {
   populationSize: 30,          // was 20 — more diversity, better exploration
   maxGenerations: 200,
   targetFitness: 2000,         // score≈342 + trampolines; calibrated target
-  inputs: 9,
+  inputs: 17, // expanded: +4 platform type, +1 bonus, +3 wrap-awareness
   outputs: 3,
   compatibilityThreshold: 1.5, // was 3.0 — lower so weight diffs create multiple species
   c1: 1.0,
