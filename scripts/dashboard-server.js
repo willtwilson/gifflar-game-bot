@@ -189,10 +189,20 @@ const HTML = `<!DOCTYPE html>
   .section-title{font-size:1.1rem;font-weight:700;margin-bottom:16px;color:#e5e7eb}
   .empty-state{text-align:center;padding:48px;color:#4b5563}
   .empty-state .big{font-size:3rem;margin-bottom:8px}
+  /* ── Status Banner ── */
+  #status-banner {
+    width: 100vw;
+    left: 0; top: 0; position: fixed; z-index: 1000;
+    text-align: center; font-size: 1.1rem; font-weight: 600;
+    padding: 12px 0; color: #fff; letter-spacing: 0.03em;
+    display: none;
+  }
+  #status-banner.orange { background: #f59e0b; color: #222; display: block; }
+  #status-banner.red { background: #ef4444; color: #fff; display: block; }
 </style>
 </head>
 <body>
-
+<div id="status-banner"></div>
 <!-- Top Bar -->
 <div id="topbar">
   <h1>🧬 NEAT Training Dashboard</h1>
@@ -345,6 +355,37 @@ Current target: <strong style="color:#f59e0b">2000+ fitness (~score 342+)</stron
     const isActive = data.currentGenProgress && data.currentGenProgress.completed > 0;
     const dot = document.getElementById('status-dot');
     dot.className = 'status-dot' + (isActive ? ' active' : '');
+
+    // ── Status Banner ──
+    try {
+      const banner = document.getElementById('status-banner');
+      let bannerText = '';
+      let bannerClass = '';
+      // Example logic: show orange if best fitness < 500, red if < 200
+      const lastGen = data.generations && data.generations[data.generations.length-1];
+      const bestFit = lastGen ? lastGen.bestFitness : null;
+      if (typeof bestFit === 'number') {
+        if (bestFit < 200) {
+          bannerText = '⚠️ NEAT status: CRITICAL – Best fitness extremely low!';
+          bannerClass = 'red';
+        } else if (bestFit < 500) {
+          bannerText = '⚠️ NEAT status: WARNING – Best fitness below target.';
+          bannerClass = 'orange';
+        }
+      }
+      if (bannerText) {
+        banner.textContent = bannerText;
+        banner.className = bannerClass;
+        banner.style.display = 'block';
+      } else {
+        banner.textContent = '';
+        banner.className = '';
+        banner.style.display = 'none';
+      }
+    } catch (e) {
+      // Robust error handling: log but do not break dashboard
+      if (window && window.console) window.console.warn('Status banner error:', e);
+    }
 
     // Top bar
     const prog = data.currentGenProgress || {};

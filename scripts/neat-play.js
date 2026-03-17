@@ -284,6 +284,50 @@ async function runGenome(context, genome) {
 
 // ── Main training loop ─────────────────────────────────────────────────────
 async function main() {
+  // ── Throttled mode: restrict CPU usage or pause during 7am–midnight ──
+  function isThrottledHours() {
+    const now = new Date();
+    const hour = now.getHours();
+    return hour >= 7 && hour < 24;
+  }
+
+  function setLowPriority() {
+    try {
+      if (process.platform === 'win32') {
+        // Windows: set process priority to BELOW_NORMAL (0x4000)
+        const { execSync } = require('child_process');
+        execSync(`wmic process where ProcessId=${process.pid} CALL setpriority 6`);
+        console.log('[THROTTLE] Process priority set to BELOW_NORMAL');
+      } else if (process.platform === 'linux' || process.platform === 'darwin') {
+        // Unix: set nice value to 10
+        process.setPriority(10);
+        console.log('[THROTTLE] Process nice set to 10');
+      }
+    } catch (e) {
+      console.log('[THROTTLE] Unable to set low priority:', e.message);
+      return false;
+    }
+    return true;
+  }
+
+  let throttlingActive = false;
+  if (isThrottledHours()) {
+    throttlingActive = setLowPriority();
+    if (!throttlingActive) {
+      logHealthCheck('before pause', browser, context);
+      console.log('[THROTTLE] Pausing NEAT training during restricted hours (7am–midnight)');
+      // Sleep until midnight
+      const now = new Date();
+      const msToMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 5) - now;
+      setTimeout(() => process.exit(0), msToMidnight);
+      await new Promise(resolve => setTimeout(resolve, msToMidnight));
+      logHealthCheck('after resume', browser, context);
+      return;
+    }
+  } else {
+    console.log('[THROTTLE] Not in restricted hours, running at normal priority');
+  }
+
   console.log('🧬 NEAT Player — starting up');
   console.log(`  populationSize: ${config.populationSize}, maxGenerations: ${config.maxGenerations}`);
   console.log(`  resume: ${resume}, headless: ${headless}`);
@@ -341,6 +385,7 @@ async function main() {
   let browser = await chromium.launch({ headless });
   let context  = await browser.newContext(CONTEXT_OPTS);
   let pagesOpened = 0;
+  logHealthCheck('after browser launch', browser, context);
   console.log('  Browser launched (shared context across all genome runs)');
 
   /** Tear down the current browser+context and spin up fresh ones. */
@@ -350,6 +395,7 @@ async function main() {
     browser      = await chromium.launch({ headless });
     context      = await browser.newContext(CONTEXT_OPTS);
     pagesOpened  = 0;
+    logHealthCheck('after browser recycle', browser, context);
     console.log('  🔄 New browser ready');
   }
 
@@ -472,6 +518,21 @@ async function main() {
   }
   console.log(`  Results written to: ${RESULTS}`);
   console.log(`  Checkpoint at:      ${CHECKPOINT}`);
+}
+
+// Additional health check utilities
+function logHealthCheck(stage, browser, context) {
+  try {
+    const browserStatus = browser && browser.isConnected ? browser.isConnected() : false;
+    const contextStatus = context && context.pages ? true : false;
+    if (!browserStatus || !contextStatus) {
+      console.error(`[HEALTH CHECK] ${stage}: Browser or context not healthy! browserConnected=${browserStatus}, contextValid=${contextStatus}`);
+    } else {
+      console.log(`[HEALTH CHECK] ${stage}: Browser and context healthy.`);
+    }
+  } catch (e) {
+    console.error(`[HEALTH CHECK] ${stage}: Exception during health check:`, e.message);
+  }
 }
 
 main().catch(err => { console.error('Fatal:', err); process.exit(1); });
