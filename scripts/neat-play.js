@@ -47,24 +47,98 @@ function appendResult(entry) {
   fs.appendFileSync(RESULTS, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n', 'utf8');
 }
 
-function saveCheckpoint(pop) {
+/**
+ * Save checkpoint.  When midGen is provided the checkpoint also records
+ * which genome we're currently at so a crash can be recovered mid-generation.
+ *
+ * @param {Population} pop
+ * @param {{ gen: number, genomeIndex: number, fitnessMap: Map<string,number> } | null} midGen
+ */
+function saveCheckpoint(pop, midGen = null) {
+  // Fix: remove innovationTracker from pop.toJSON() output (stored separately as _innovationTracker)
   const data = pop.toJSON();
+  delete data.innovationTracker;
   data._innovationTracker = innovationTracker.toJSON();
+  if (midGen) {
+    data._midGen = {
+      gen:        midGen.gen,
+      genomeIndex: midGen.genomeIndex,
+      fitnessMap: Object.fromEntries(midGen.fitnessMap),
+    };
+  } else {
+    delete data._midGen;
+  }
   fs.writeFileSync(CHECKPOINT, JSON.stringify(data, null, 2), 'utf8');
 }
 
-// ── Run a single genome through one round ─────────────────────────────────
-async function runGenome(genome) {
-  const browser = await chromium.launch({ headless });
-  const context = await browser.newContext({
-    viewport:  { width: 375, height: 812 },
-    hasTouch:  true,
-    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+// ── Form filling — shared helper, only needed on first genome per session ──
+async function fillAndSubmitForm(page) {
+  await page.evaluate(() => {
+    ['MODAL_BACKDROP', 'ADDITIONAL_TEXT_CONTAINER'].forEach(t => {
+      const e = document.querySelector(`[data-testid="${t}"]`);
+      if (e) e.style.pointerEvents = 'none';
+    });
+    const f = document.querySelector('[data-testid="GAMEFORM_CONTAINER"]');
+    if (f) { f.style.position = 'relative'; f.style.zIndex = '99999'; }
   });
+
+  // Check whether the registration form is present BEFORE clicking START
+  // (clicking START on a returning player starts the round immediately)
+  const hasFormFirst = await page.evaluate(
+    () => !!document.querySelector('[data-testid="GAMEFORM_CONTAINER"]')
+  );
+
+  if (!hasFormFirst) {
+    try {
+      await page.locator('[data-testid="START_BUTTON"]').click({ force: true, timeout: 2000 });
+      await page.waitForTimeout(1000);
+    } catch (_) {}
+  } else {
+    await page.locator('[data-testid="START_BUTTON"]').click({ force: true });
+    await page.waitForTimeout(1500);
+  }
+
+  const hasForm = await page.evaluate(
+    () => !!document.querySelector('[data-testid="GAMEFORM_CONTAINER"]')
+  );
+  if (!hasForm) return;
+
+  for (const [placeholder, value] of [
+    ['Name', NAME],
+    ['Enter your e-mail address', EMAIL],
+    ['username', USERNAME],
+  ]) {
+    await page.locator(`input[placeholder="${placeholder}"]`).click({ force: true });
+    await page.locator(`input[placeholder="${placeholder}"]`).fill(value);
+  }
+
+  await page.evaluate(() => {
+    ['GAME_FORM_TERMS', 'PARAM1'].forEach(id => {
+      const c = document.getElementById(id);
+      if (!c) return;
+      const p = Object.keys(c).find(k => k.startsWith('__reactProps$'));
+      if (p && c[p].onChange) c[p].onChange({ target: { checked: true } });
+    });
+  });
+  await page.waitForTimeout(200);
+
+  await page.evaluate(() => {
+    const f = document.querySelector('[data-testid="GAMEFORM_CONTAINER"] form');
+    if (!f) return;
+    const p = Object.keys(f).find(k => k.startsWith('__reactProps$'));
+    if (p) f[p].onSubmit({
+      preventDefault: () => {}, stopPropagation: () => {},
+      target: f, currentTarget: f, nativeEvent: new Event('submit'),
+    });
+  });
+}
+
+// ── Run a single genome through one round ─────────────────────────────────
+// Reuses the shared browser context — opens a new tab, plays, then closes it.
+async function runGenome(context, genome) {
   const page = await context.newPage();
 
-  // Capture score from API
-  let apiScore     = 0;
+  // Capture isCheater flag from API response
   let isCheater    = false;
   let apiResponded = false;
 
@@ -72,87 +146,24 @@ async function runGenome(genome) {
     if (res.url().includes('/api/post-game-score')) {
       try {
         const body = await res.json();
-        apiScore    = body.highScore || 0;
-        isCheater   = body.isCheater || false;
+        isCheater    = body.isCheater || false;
         apiResponded = true;
       } catch (_) {}
     }
   });
 
-  // Inject the NEAT brain IIFE and genome (pre-inject so genome is available at page-load time)
-  await page.addInitScript(neatBrainSrc);
-  await page.addInitScript(`window.__NEAT_GENOME__ = ${JSON.stringify(genome.toJSON())};`);
+  try {
+    // Inject brain + genome weights before page load
+    await page.addInitScript(neatBrainSrc);
+    await page.addInitScript(`window.__NEAT_GENOME__ = ${JSON.stringify(genome.toJSON())};`);
 
   await page.goto(GAME_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
   await page.waitForTimeout(4000);
 
-  // ── Form filling — only clicks START_BUTTON if form is present ────────────
-  async function fillAndSubmitForm() {
-    await page.evaluate(() => {
-      ['MODAL_BACKDROP', 'ADDITIONAL_TEXT_CONTAINER'].forEach(t => {
-        const e = document.querySelector(`[data-testid="${t}"]`);
-        if (e) e.style.pointerEvents = 'none';
-      });
-      const f = document.querySelector('[data-testid="GAMEFORM_CONTAINER"]');
-      if (f) { f.style.position = 'relative'; f.style.zIndex = '99999'; }
-    });
-
-    // Check whether the registration form is present BEFORE clicking START
-    // (clicking START on a returning player starts the round immediately)
-    const hasFormFirst = await page.evaluate(
-      () => !!document.querySelector('[data-testid="GAMEFORM_CONTAINER"]')
-    );
-
-    if (!hasFormFirst) {
-      // Try clicking START once in case form appears on first click
-      try {
-        await page.locator('[data-testid="START_BUTTON"]').click({ force: true, timeout: 2000 });
-        await page.waitForTimeout(1000);
-      } catch (_) {}
-    } else {
-      await page.locator('[data-testid="START_BUTTON"]').click({ force: true });
-      await page.waitForTimeout(1500);
-    }
-
-    const hasForm = await page.evaluate(
-      () => !!document.querySelector('[data-testid="GAMEFORM_CONTAINER"]')
-    );
-    if (!hasForm) return;
-
-    for (const [placeholder, value] of [
-      ['Name', NAME],
-      ['Enter your e-mail address', EMAIL],
-      ['username', USERNAME],
-    ]) {
-      await page.locator(`input[placeholder="${placeholder}"]`).click({ force: true });
-      await page.locator(`input[placeholder="${placeholder}"]`).fill(value);
-    }
-
-    await page.evaluate(() => {
-      ['GAME_FORM_TERMS', 'PARAM1'].forEach(id => {
-        const c = document.getElementById(id);
-        if (!c) return;
-        const p = Object.keys(c).find(k => k.startsWith('__reactProps$'));
-        if (p && c[p].onChange) c[p].onChange({ target: { checked: true } });
-      });
-    });
-    await page.waitForTimeout(200);
-
-    await page.evaluate(() => {
-      const f = document.querySelector('[data-testid="GAMEFORM_CONTAINER"] form');
-      if (!f) return;
-      const p = Object.keys(f).find(k => k.startsWith('__reactProps$'));
-      if (p) f[p].onSubmit({
-        preventDefault: () => {}, stopPropagation: () => {},
-        target: f, currentTarget: f, nativeEvent: new Event('submit'),
-      });
-    });
-  }
-
-  await fillAndSubmitForm();
+  await fillAndSubmitForm(page);
   await page.waitForTimeout(1000);
 
-  // Genome already injected via addInitScript — confirm it's live in page
+  // Confirm genome is live (guards against rare timing issues)
   await page.evaluate((g) => { window.__NEAT_GENOME__ = g; }, genome.toJSON());
 
   // ── Click to start next round ──────────────────────────────────────────
@@ -179,19 +190,31 @@ async function runGenome(genome) {
 
   // ── Play until round ends ──────────────────────────────────────────────
   const roundStart  = Date.now();
-  const MAX_ROUND_MS = 90000;
+  const MAX_ROUND_MS = 45000;  // 45s cap — best runs are <35s; 90s was wasteful
   const MIN_ROUND_MS = 5000;
+  const SCORE_STAGNATION_MS = 12000; // exit if score doesn't improve for 12 s
+
+  let lastScore = -1;
+  let lastScoreChangeMs = Date.now();
 
   while (Date.now() - roundStart < MAX_ROUND_MS) {
     const snap = await page.evaluate(() => {
       const g = window.__PHASER_GAME__;
       const s = g?.scene?.scenes?.find(sc => sc.sys?.settings?.key === 'GAME_SCENE');
-      if (!s) return { roundOver: true };
+      if (!s) return { roundOver: true, stagnantBounces: 0, score: 0 };
       return {
         roundOver:       !!s.roundOver,
         stagnantBounces: window.__NEAT_AI__?.stagnantBounces || 0,
+        score:           window.__NEAT_AI__?.score || 0,
       };
     });
+
+    // Score progress tracking — only reset timer when score improves by a meaningful amount.
+    // Using !== would reset on every tiny floating-point tick from highestPointReached.
+    if (snap.score >= lastScore + 0.5) {
+      lastScore = snap.score;
+      lastScoreChangeMs = Date.now();
+    }
 
     if (snap.roundOver && (Date.now() - roundStart) > MIN_ROUND_MS) {
       // Double-check to avoid transient false positives
@@ -204,8 +227,23 @@ async function runGenome(genome) {
       if (stillOver) break;
     }
 
-    // Force-exit on extreme stagnation
+    // Force-exit on extreme bounce stagnation
     if (snap.stagnantBounces > 15 && (Date.now() - roundStart) > MIN_ROUND_MS) {
+      await page.evaluate(() => {
+        const g = window.__PHASER_GAME__;
+        const s = g?.scene?.scenes?.find(sc => sc.sys?.settings?.key === 'GAME_SCENE');
+        if (s?.player && s.cameras?.main) {
+          const belowScreen = s.cameras.main.scrollY + s.cameras.main.height + 200;
+          try { s.player.setPosition(s.player.x, belowScreen); } catch (_) {}
+        }
+      });
+      await page.waitForTimeout(800);
+      break;
+    }
+
+    // Force-exit when score has not improved for SCORE_STAGNATION_MS (ball stuck bouncing in place)
+    if ((Date.now() - lastScoreChangeMs) > SCORE_STAGNATION_MS && (Date.now() - roundStart) > MIN_ROUND_MS) {
+      process.stdout.write(` [stagnant@${((Date.now()-roundStart)/1000).toFixed(0)}s]`);
       await page.evaluate(() => {
         const g = window.__PHASER_GAME__;
         const s = g?.scene?.scenes?.find(sc => sc.sys?.settings?.key === 'GAME_SCENE');
@@ -222,119 +260,207 @@ async function runGenome(genome) {
   }
 
   // ── Collect results ────────────────────────────────────────────────────
-  const ai = await page.evaluate(() => window.__NEAT_AI__ || {});
-  const durationMs = Date.now() - roundStart;
+    const ai = await page.evaluate(() => window.__NEAT_AI__ || {});
+    const durationMs = Date.now() - roundStart;
 
-  // Wait briefly for API response
-  if (!apiResponded) {
-    await page.waitForTimeout(2000);
+    // Wait briefly for API response
+    if (!apiResponded) {
+      await page.waitForTimeout(2000);
+    }
+
+    return {
+      genomeId:       genome.id,
+      highestY:       ai.highestY        || 0,
+      score:          ai.score           || 0,   // use brain score, not API highScore (API returns account all-time best)
+      trampolineHits: ai.trampolineHits  || 0,
+      isCheater:      isCheater,
+      durationMs:     durationMs,
+      lastAction:     ai.lastAction      || 'NONE',
+    };
+  } finally {
+    await page.close().catch(() => {});
   }
-
-  await browser.close();
-
-  return {
-    genomeId:       genome.id,
-    highestY:       ai.highestY        || 0,
-    score:          ai.score           || 0,   // use brain score, not API highScore (API returns account all-time best)
-    trampolineHits: ai.trampolineHits  || 0,
-    isCheater:      isCheater,
-    durationMs:     durationMs,
-    lastAction:     ai.lastAction      || 'NONE',
-  };
 }
 
 // ── Main training loop ─────────────────────────────────────────────────────
 async function main() {
   console.log('🧬 NEAT Player — starting up');
   console.log(`  populationSize: ${config.populationSize}, maxGenerations: ${config.maxGenerations}`);
-  console.log(`  resume: ${resume}`);
+  console.log(`  resume: ${resume}, headless: ${headless}`);
 
   let population;
+  let resumeMidGen = null; // { gen, genomeIndex, fitnessMap } — set when crash-recovery is possible
 
   if (resume && fs.existsSync(CHECKPOINT)) {
     console.log(`\n📂 Resuming from ${CHECKPOINT}`);
     const data = JSON.parse(fs.readFileSync(CHECKPOINT, 'utf8'));
 
-    // Restore innovation tracker
+    // Restore innovation tracker (toJSON serialises as { map, next })
     if (data._innovationTracker) {
-      const restored = require('../neat/innovation.js');
       const it = require('../neat/innovation.js');
-      Object.assign(it, require('../neat/innovation.js').constructor
-        ? require('../neat/innovation.js')
-        : {});
-      // Re-hydrate via fromJSON on the singleton
-      const { _map, _next } = data._innovationTracker;
-      it._map  = new Map(_map);
-      it._next = _next;
+      const { map, next } = data._innovationTracker;
+      it._map  = new Map(map);
+      // Derive _next from the max stored value to avoid reusing existing numbers
+      // if next is missing/corrupted (e.g., from a previously broken checkpoint)
+      const mapValues = [...new Map(map).values()].filter(v => typeof v === 'number');
+      it._next = typeof next === 'number' ? next : (mapValues.length ? Math.max(...mapValues) + 1 : 0);
     }
 
     population = Population.fromJSON(data, config, innovationTracker);
-    console.log(`  Resumed at generation ${population.getGeneration()}, bestFitness: ${population.bestFitness.toFixed(2)}`);
+
+    // Mid-generation crash recovery: _midGen records which genome we stopped at
+    if (data._midGen) {
+      resumeMidGen = {
+        gen:        data._midGen.gen,
+        genomeIndex: data._midGen.genomeIndex,
+        fitnessMap: new Map(Object.entries(data._midGen.fitnessMap).map(([k, v]) => [k, Number(v)])),
+      };
+      console.log(`  Mid-gen crash detected: gen ${resumeMidGen.gen + 1}, completed ${resumeMidGen.genomeIndex + 1}/${population.genomes.length} genomes`);
+      console.log(`  Will resume from genome ${resumeMidGen.genomeIndex + 2}/${population.genomes.length}`);
+    } else {
+      console.log(`  Resumed at generation ${population.getGeneration()}, bestFitness: ${(population.bestFitness ?? -Infinity).toFixed(2)}`);
+    }
   } else {
     population = new Population(config, innovationTracker);
     population.initialise();
     console.log(`  Initialised fresh population (${population.genomes.length} genomes, ${population.species.length} species)`);
   }
 
-  let allTimeBestFitness = population.bestFitness || -Infinity;
+  let allTimeBestFitness = population.bestFitness ?? -Infinity;
 
-  for (let gen = population.getGeneration(); gen < population.getGeneration() + config.maxGenerations; gen++) {
-    const genStart = Date.now();
-    console.log(`\n══ Generation ${gen + 1} ══ (${population.genomes.length} genomes, ${population.species.length} species)`);
+  // ── Browser / context management (supports crash recovery) ───────────────
+  // Recreate the browser every BROWSER_RESTART_EVERY genomes to avoid memory
+  // build-up, and automatically recover if the browser crashes mid-run.
+  const BROWSER_RESTART_EVERY = 40;   // pages opened before a proactive restart
+  const CONTEXT_OPTS = {
+    viewport:  { width: 375, height: 812 },
+    hasTouch:  true,
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+  };
 
-    const fitnessMap = new Map();
-    let cheaterCount = 0;
+  let browser = await chromium.launch({ headless });
+  let context  = await browser.newContext(CONTEXT_OPTS);
+  let pagesOpened = 0;
+  console.log('  Browser launched (shared context across all genome runs)');
 
-    for (let gi = 0; gi < population.genomes.length; gi++) {
-      const genome = population.genomes[gi];
-      process.stdout.write(`  [${gi + 1}/${population.genomes.length}] genome ${genome.id} ... `);
+  /** Tear down the current browser+context and spin up fresh ones. */
+  async function recycleBrowser(reason) {
+    console.log(`\n  🔄 Recycling browser (${reason})…`);
+    try { await browser.close(); } catch (_) {}
+    browser      = await chromium.launch({ headless });
+    context      = await browser.newContext(CONTEXT_OPTS);
+    pagesOpened  = 0;
+    console.log('  🔄 New browser ready');
+  }
 
-      let result;
-      try {
-        result = await runGenome(genome);
-      } catch (err) {
-        console.error(`\n  ❌ Error running genome ${genome.id}:`, err.message);
-        result = { genomeId: genome.id, highestY: 0, score: 0, trampolineHits: 0, isCheater: false, durationMs: 0 };
+  /**
+   * Run a genome with automatic browser-crash recovery.
+   * On first failure we recycle the browser and retry once.
+   */
+  async function runGenomeSafe(genome) {
+    // Proactively restart the browser every BROWSER_RESTART_EVERY pages
+    if (pagesOpened > 0 && pagesOpened % BROWSER_RESTART_EVERY === 0) {
+      await recycleBrowser(`${pagesOpened} pages opened`);
+    }
+
+    try {
+      const result = await runGenome(context, genome);
+      pagesOpened++;
+      return result;
+    } catch (firstErr) {
+      const msg = firstErr.message || '';
+      const isBrowserDead =
+        msg.includes('closed') || msg.includes('crashed') ||
+        msg.includes('disconnected') || msg.includes('Target closed') ||
+        msg.includes('net::ERR');
+
+      console.error(`\n  ❌ Error running genome ${genome.id}: ${msg.slice(0, 120)}`);
+
+      if (isBrowserDead) {
+        await recycleBrowser('browser error detected');
+        try {
+          console.log('  ↩️  Retrying genome after browser recycle…');
+          const result = await runGenome(context, genome);
+          pagesOpened++;
+          return result;
+        } catch (retryErr) {
+          console.error(`  ❌ Retry also failed: ${retryErr.message.slice(0, 120)}`);
+        }
       }
 
-      const fitness = calcFitness(result);
-      fitnessMap.set(genome.id, fitness);
-      if (result.isCheater) cheaterCount++;
-
-      console.log(`score=${result.score.toFixed(1)} fit=${fitness.toFixed(1)} dur=${(result.durationMs / 1000).toFixed(0)}s tramp=${result.trampolineHits}${result.isCheater ? ' CHEAT' : ''}`);
-
-      appendResult({
-        generation:    gen + 1,
-        genomeIndex:   gi + 1,
-        ...result,
-        fitness,
-      });
+      return { genomeId: genome.id, highestY: 0, score: 0, trampolineHits: 0, isCheater: false, durationMs: 0 };
     }
+  }
 
-    population.evaluateFitness(fitnessMap);
+  try {
+    const startGen = population.getGeneration();
+    for (let gen = startGen; gen < startGen + config.maxGenerations; gen++) {
+      const genStart = Date.now();
 
-    const bestFit   = Math.max(...[...fitnessMap.values()]);
-    const avgFit    = [...fitnessMap.values()].reduce((s, v) => s + v, 0) / fitnessMap.size;
-    const bestEntry = population.genomes.reduce((a, b) =>
-      (fitnessMap.get(a.id) || 0) >= (fitnessMap.get(b.id) || 0) ? a : b
-    );
+      // ── Mid-gen crash recovery ─────────────────────────────────────────────
+      let fitnessMap    = new Map();
+      let cheaterCount  = 0;
+      let startGi       = 0;
 
-    if (bestFit > allTimeBestFitness) allTimeBestFitness = bestFit;
+      if (resumeMidGen && resumeMidGen.gen === gen) {
+        fitnessMap   = resumeMidGen.fitnessMap;
+        cheaterCount = [...fitnessMap.values()].filter(f => f === 0).length; // best-effort
+        startGi      = resumeMidGen.genomeIndex + 1;
+        resumeMidGen = null;
+        console.log(`\n══ Generation ${gen + 1} ══ (RESUMED from genome ${startGi + 1}/${population.genomes.length})`);
+      } else {
+        console.log(`\n══ Generation ${gen + 1} ══ (${population.genomes.length} genomes, ${population.species.length} species)`);
+        // Save checkpoint at generation start so genome weights are captured before any run
+        saveCheckpoint(population, { gen, genomeIndex: -1, fitnessMap });
+      }
 
-    const elapsed = ((Date.now() - genStart) / 1000).toFixed(0);
-    console.log(`\n  ✅ Gen ${gen + 1} done in ${elapsed}s`);
-    console.log(`     bestFit=${bestFit.toFixed(2)} avgFit=${avgFit.toFixed(2)} allTimeBest=${allTimeBestFitness.toFixed(2)}`);
-    console.log(`     species=${population.species.length} cheaters=${cheaterCount}`);
+      for (let gi = startGi; gi < population.genomes.length; gi++) {
+        const genome = population.genomes[gi];
+        process.stdout.write(`  [${gi + 1}/${population.genomes.length}] genome ${genome.id} ... `);
 
-    saveCheckpoint(population);
+        const result  = await runGenomeSafe(genome);
+        const fitness = calcFitness(result);
+        fitnessMap.set(genome.id, fitness);
+        if (result.isCheater) cheaterCount++;
 
-    if (allTimeBestFitness >= config.targetFitness) {
-      console.log(`\n🎯 Target fitness ${config.targetFitness} reached! Stopping.`);
-      break;
+        console.log(`score=${result.score.toFixed(0)} fit=${fitness.toFixed(1)} dur=${(result.durationMs / 1000).toFixed(0)}s tramp=${result.trampolineHits}${result.isCheater ? ' CHEAT' : ''}`);
+
+        appendResult({
+          generation:    gen + 1,
+          genomeIndex:   gi + 1,
+          ...result,
+          fitness,
+        });
+
+        // Save after every genome so a crash mid-generation is recoverable
+        saveCheckpoint(population, { gen, genomeIndex: gi, fitnessMap });
+      }
+
+      population.evaluateFitness(fitnessMap);
+
+      const bestFit = Math.max(...[...fitnessMap.values()]);
+      const avgFit  = [...fitnessMap.values()].reduce((s, v) => s + v, 0) / fitnessMap.size;
+
+      if (bestFit > allTimeBestFitness) allTimeBestFitness = bestFit;
+
+      const elapsed = ((Date.now() - genStart) / 1000).toFixed(0);
+      console.log(`\n  ✅ Gen ${gen + 1} done in ${elapsed}s`);
+      console.log(`     bestFit=${bestFit.toFixed(2)} avgFit=${avgFit.toFixed(2)} allTimeBest=${allTimeBestFitness.toFixed(2)}`);
+      console.log(`     species=${population.species.length} cheaters=${cheaterCount}`);
+
+      // Clean end-of-generation checkpoint (no _midGen)
+      saveCheckpoint(population);
+
+      if (allTimeBestFitness >= config.targetFitness) {
+        console.log(`\n🎯 Target fitness ${config.targetFitness} reached! Stopping.`);
+        break;
+      }
+
+      population.evolve();
+      console.log(`  After evolve: ${population.genomes.length} genomes, ${population.species.length} species`);
     }
-
-    population.evolve();
-    console.log(`  After evolve: ${population.genomes.length} genomes, ${population.species.length} species`);
+  } finally {
+    await browser.close();
   }
 
   const best = population.getBestGenome();
